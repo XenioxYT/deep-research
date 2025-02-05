@@ -678,8 +678,7 @@ class DeepResearchAgent:
         1. Required sections and their order
         2. What to include in each section
         3. Specific formatting guidelines
-        4. How to use citations and quotes
-        5. Any special considerations for this topic
+        4. Any special considerations for this topic
         The structure should be tailored to the specific query type (e.g., product analysis, historical research, current events, etc.)]"""
         
         try:
@@ -922,7 +921,7 @@ Location: {self.approximate_location}
                 - Write numbers in plain ASCII (1,234.56)
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
-                Format in clean Markdown without code blocks.
+                Format in clean Markdown without code blocks (unless for code snippets).
                 
                 DO NOT include a sources section - it will be added automatically."""
                 
