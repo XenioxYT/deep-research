@@ -566,20 +566,26 @@ class DeepResearchAgent:
         self.logger.info("Analyzing research state...")
         
         prompt = f"""{self.system_context}
-        Analyze the research on '{main_query}'.
+        Analyze the research on: '{main_query}'
         Current data: {json.dumps(current_data, indent=2)}
         
-        Determine if more research is needed and what specific information is missing.
-        Also identify any URLs that should be blacklisted (irrelevant, outdated, etc.).
+        IMPORTANT DECISION GUIDELINES:
+        1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately - no research needed
+        2. For queries that can be fully answered with current findings, say NO
+        3. For queries needing more depth/verification, say YES and specify what's missing
+        4. Consider the query ANSWERED when you have:
+           - Sufficient high-quality sources (relevance_score > 0.6)
+           - Enough information to provide a comprehensive answer
+           - Cross-verified key information from multiple sources
         
-        If more research is needed, provide up to 10 COMPLETE search queries that would help fill the gaps.
-        These should be actual search queries ready to be used. Keep them simple.
-        Make sure to relate the queries to the main query to find extra information about the topic and the results you have already found.
-        
-        Say NO at any time to end the research and produce a final report. You should be saying NO when the original query is answered, or when you have gathered enough information.
+        ANALYSIS STEPS:
+        1. First, determine if this is a simple factual query requiring no research
+        2. If research is needed, assess if current findings sufficiently answer the query
+        3. Only continue research if genuinely valuable information is missing
         
         Format response EXACTLY as follows:
-        DECISION: [YES/NO]
+        DECISION: [YES (continue research)/NO (produce final report)]
+        REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
         SEARCH_QUERIES: [List complete search queries, one per line, max 10]"""
@@ -610,6 +616,9 @@ class DeepResearchAgent:
                     current_section = "MISSING"
                 elif line.startswith("SEARCH_QUERIES:"):
                     current_section = "SEARCH_QUERIES"
+                elif line.startswith("REASON:"):  # Add reason to explanation
+                    explanation = line.split(":", 1)[1].strip()
+                    current_section = None
                 else:
                     # Handle section content
                     if current_section == "BLACKLIST" and line.startswith('http'):
@@ -620,7 +629,7 @@ class DeepResearchAgent:
                         # Handle multiple query formats
                         if line.startswith('- '):
                             search_queries.append(line[2:].strip())
-                        elif line.strip() and not line.startswith(('DECISION:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:')):
+                        elif line.strip() and not line.startswith(('DECISION:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:')):
                             # Handle numbered or plain queries
                             clean_query = line.split('. ', 1)[-1] if '. ' in line else line
                             search_queries.append(clean_query.strip())
@@ -629,8 +638,10 @@ class DeepResearchAgent:
             self.blacklisted_urls.update(blacklist)
             
             # Prepare explanation
-            explanation = "Missing Information:\n" + "\n".join(f"- {m}" for m in missing)
-            explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
+            if missing:
+                explanation += "\n\nMissing Information:\n" + "\n".join(f"- {m}" for m in missing)
+            if search_queries:
+                explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
             
             return decision, explanation, search_queries
         except Exception as e:
