@@ -775,15 +775,55 @@ Location: {self.approximate_location}
 
     async def generate_report(self, main_query: str, research_data: Dict) -> str:
         """Generate a comprehensive report from the gathered research data with streaming output."""
-        # Prepare enhanced context with high-ranking URLs
+        # Prepare enhanced context with high-ranking URLs and detailed source information
+        high_ranking_sources = {}
+        for url, data in self.high_ranking_urls.items():
+            # Find the full content from research_data
+            source_content = None
+            for iteration in research_data['iterations']:
+                for finding in iteration['findings']:
+                    if finding['source'] == url:
+                        source_content = finding['content']
+                        break
+                if source_content:
+                    break
+            
+            high_ranking_sources[url] = {
+                'title': data['title'],
+                'snippet': data['snippet'],
+                'score': data['score'],
+                'content': source_content,  # Full content if available
+                'domain': data['domain'],
+                'queries_used': data['source_queries'],
+                'scrape_decision': data.get('scrape_decision', {})
+            }
+        
+        # Sort sources by score for easy reference
+        sorted_sources = sorted(
+            high_ranking_sources.items(),
+            key=lambda x: x[1]['score'],
+            reverse=True
+        )
+        
+        # Create numbered references for citations
+        source_references = {
+            url: f"[{i+1}]" 
+            for i, (url, _) in enumerate(sorted_sources)
+        }
+        
         report_context = {
             'main_query': main_query,
             'research_data': research_data,
-            'high_ranking_sources': self.high_ranking_urls,
+            'high_ranking_sources': dict(sorted_sources),  # Ordered by score
+            'source_references': source_references,  # For citations
             'total_sources_analyzed': len(self.all_results),
             'total_high_ranking_sources': len(self.high_ranking_urls),
             'research_iterations': self.research_iterations,
-            'total_queries_used': len(self.previous_queries)
+            'total_queries_used': len(self.previous_queries),
+            'queries_by_iteration': [
+                iter_data['queries_used'] 
+                for iter_data in research_data['iterations']
+            ]
         }
         
         prompt = f"""Generate a comprehensive research report on: '{main_query}'
@@ -791,28 +831,71 @@ Location: {self.approximate_location}
         {json.dumps(report_context, indent=2)}
         
         Important Guidelines:
-        - Focus on information from high-ranking sources (score > 0.6)
-        - Cross-reference information across multiple sources
-        - Highlight any conflicting information found
-        - Include citation links using the source URLs (using a [number] referencing a number in section 5 of the report.)
-        - If you have a LOT of information, this report should be long, detailed and comprehensive.
+        - This should be a DETAILED, COMPREHENSIVE report using ALL available information
+        - Use ALL high-ranking sources (score > 0.6) in your analysis
+        - Cross-reference and compare information across multiple sources
+        - Highlight agreements and contradictions between sources
+        - Include direct quotes when they add value, using proper citation numbers
+        - Use citation numbers [X] from source_references for ALL claims
+        - If sources provide different perspectives, analyze all viewpoints
         
-        Organize the report with clear sections, including:
+        Required Report Structure:
         1. Executive Summary
-        2. Key Findings
-        3. Detailed Analysis
-        4. Opinions on the information
-        5. Sources and Citations (prioritize high-ranking sources)
-        6. Research Methodology (including iterations and refinements)
+           - Brief overview of findings
+           - Key conclusions
+           - Scope of research
         
-        Make it detailed yet easy to understand.
+        2. Key Findings
+           - Major discoveries
+           - Important statistics
+           - Critical insights
+           - Each finding must cite sources
+        
+        3. Detailed Analysis
+           - In-depth examination of all aspects
+           - Compare and contrast different sources
+           - Include relevant quotes with citations
+           - Analyze trends and patterns
+           - Discuss implications
+        
+        4. Expert Opinions and Market Response
+           - Expert viewpoints from sources
+           - Market implications if relevant
+           - Industry response and reactions
+           - Future predictions or expectations
+        
+        5. Sources and Citations
+           - List ALL high-ranking sources
+           - Include relevance scores
+           - Brief description of each source's contribution
+           - Note any potential biases
+        
+        6. Research Methodology
+           - Detail the research process
+           - Queries used in each iteration
+           - How information was gathered and verified
+           - Limitations and potential gaps
+        
+        Make it detailed, thorough, and well-structured.
+        Use proper Markdown formatting including:
+        - Headers (##, ###)
+        - Lists (- or 1.)
+        - Blockquotes (>) for important quotes
+        - **Bold** for emphasis
+        - Proper spacing between sections
+        
         Format the report in Markdown."""
         
         try:
             # Generate streaming response
             response = self.report_model.generate_content(
                 prompt,
-                stream=True  # Enable streaming
+                stream=True,  # Enable streaming
+                generation_config={
+                    'temperature': 0.7,  # Slightly increase creativity
+                    'top_p': 0.9,  # More diverse output
+                    'max_output_tokens': 4096  # Allow for longer reports
+                }
             )
             self.logger.info("Starting report generation stream")
             return response
