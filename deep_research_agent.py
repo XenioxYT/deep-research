@@ -428,22 +428,29 @@ class DeepResearchAgent:
         self.logger.info(f"Ranking {len(new_results)} new URLs")
 
         prompt = f"""{self.system_context}
-        For the query '{main_query}', rank these new search results by relevance.
-        Respond with ONLY scores (0-0.99) for each URL, one per line.
+        For the query '{main_query}', analyze and rank these search results.
+        For each URL, determine:
+        1. Relevance score (0-0.99, or 1.0 for perfect matches)
+        2. Whether to scrape the content (YES/NO)
+        3. Reason for scraping decision
+        
+        Consider these factors for scraping:
+        - Likely contains detailed, relevant information
+        - From authoritative or primary sources
+        - Recent and up-to-date content
+        - Not a duplicate of other sources
+        - Not likely to be paywalled or restricted
+        
+        Format response EXACTLY as follows, one entry per line:
+        [url] | [score] | [YES/NO] | [reason]
+        
         IMPORTANT RULES:
-        - Only give a score of 1.0 if the content PERFECTLY matches the query intent
-        - All other scores MUST be unique (no ties) and between 0 and 0.99
-        - Use enough decimal places to ensure uniqueness
-        - Higher scores for:
-          * Official sources
-          * Recent content (based on current date: {self.current_date})
-          * Comprehensive information
-          * Reliable domains
+        - All scores must be unique (no ties) and between 0 and 1.0
+        - Only give 1.0 for perfect matches
+        - Aim to identify 10 high-value pages to scrape
+        - Give clear, concise reasons for scraping decisions
         
-        Format:
-        [url] [score]
-        
-        URLs to rank:
+        URLs to analyze:
         """ + "\n".join([
             f"{data['url']}\nTitle: {data['title']}\nSnippet: {data['snippet']}"
             for data in new_results
@@ -456,21 +463,30 @@ class DeepResearchAgent:
             # Parse rankings and verify uniqueness
             rankings = {}
             used_scores = set()
+            scrape_decisions = {}
             
             for line in response.text.strip().split('\n'):
                 try:
-                    url, score = line.rsplit(' ', 1)
-                    url = url.strip()
-                    score = float(score)
+                    # Split line by | and strip whitespace
+                    parts = [p.strip() for p in line.split('|')]
+                    if len(parts) != 4:
+                        continue
+                        
+                    url, score_str, scrape_decision, reason = parts
+                    score = float(score_str)
                     
                     # Ensure score is valid
-                    if score != 1.0 and score in used_scores and score > 0.99:
+                    if score != 1.0 and score in used_scores:
                         self.logger.warning(f"Duplicate score {score} found, adjusting slightly")
                         while score in used_scores:
                             score = max(0, min(0.99, score - 0.001))
                     
                     used_scores.add(score)
                     rankings[url] = score
+                    scrape_decisions[url] = {
+                        'should_scrape': scrape_decision.upper() == 'YES',
+                        'reason': reason
+                    }
 
                     # Track high-ranking URLs (score > 0.6)
                     if score > 0.6:
@@ -481,7 +497,8 @@ class DeepResearchAgent:
                                 'title': result['title'],
                                 'snippet': result['snippet'],
                                 'domain': result['domain'],
-                                'source_queries': result['source_queries']
+                                'source_queries': result['source_queries'],
+                                'scrape_decision': scrape_decisions[url]
                             }
                 except (ValueError, IndexError):
                     continue
@@ -491,13 +508,18 @@ class DeepResearchAgent:
             for result in new_results:
                 if result['url'] in rankings:
                     result['relevance_score'] = rankings[result['url']]
+                    result['scrape_decision'] = scrape_decisions[result['url']]
                     ranked_results.append(result)
             
             ranked_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
-            self.logger.info("Top 5 ranked new URLs:")
+            self.logger.info("Top 5 ranked URLs:")
             for r in ranked_results[:5]:
-                self.logger.info(f"{r['url']} (Score: {r.get('relevance_score', 0):.3f})")
+                self.logger.info(
+                    f"{r['url']} (Score: {r.get('relevance_score', 0):.3f}, "
+                    f"Scrape: {r['scrape_decision']['should_scrape']}, "
+                    f"Reason: {r['scrape_decision']['reason']})"
+                )
             
             return ranked_results
         except Exception as e:
@@ -588,7 +610,7 @@ class DeepResearchAgent:
         REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
-        SEARCH_QUERIES: [List complete search queries, one per line, max 10]"""
+        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes.]"""
         
         try:
             response = self.analysis_model.generate_content(prompt)  # Use analysis specific model
@@ -825,10 +847,15 @@ Location: {self.approximate_location}
             # Rank new results before adding to all_results
             ranked_new_results = self.rank_new_results(query, search_results)
             
-            # Filter out already scraped URLs and get top 8
-            new_urls = [r for r in ranked_new_results if r['url'] not in self.scraped_urls][:8]
-            if not new_urls:
-                self.logger.warning("No new URLs to scrape")
+            # Filter URLs based on scraping decisions and get top 10
+            urls_to_scrape = [
+                r for r in ranked_new_results 
+                if r['url'] not in self.scraped_urls 
+                and r.get('scrape_decision', {}).get('should_scrape', False)
+            ][:10]
+            
+            if not urls_to_scrape:
+                self.logger.warning("No URLs selected for scraping")
                 break
                 
             iteration_data = {
@@ -836,11 +863,11 @@ Location: {self.approximate_location}
                 'findings': []
             }
             
-            # Batch process content extraction for new URLs only
-            contents = await self.batch_extract_content([r['url'] for r in new_urls])
+            # Batch process content extraction for selected URLs
+            contents = await self.batch_extract_content([r['url'] for r in urls_to_scrape])
             
             # Update scraped URLs and process content
-            for result in new_urls:
+            for result in urls_to_scrape:
                 url = result['url']
                 content = contents.get(url, '')
                 if content:
@@ -852,7 +879,8 @@ Location: {self.approximate_location}
                     finding = {
                         'source': rewritten_url,
                         'content': content[:6000],
-                        'relevance_score': result.get('relevance_score', 0)
+                        'relevance_score': result.get('relevance_score', 0),
+                        'scrape_reason': result.get('scrape_decision', {}).get('reason', '')
                     }
                     iteration_data['findings'].append(finding)
                     research_data['final_sources'].append(finding)
