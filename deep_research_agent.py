@@ -36,7 +36,11 @@ class DeepResearchAgent:
         system_context += "For queries about current/latest things, use generic search terms without specific versions/numbers."
         
         genai.configure(api_key=os.getenv('GOOGLE_AI_KEY'))
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        # Initialize different models for different tasks
+        self.model = genai.GenerativeModel('gemini-1.5-flash')  # Default model for general tasks
+        self.ranking_model = genai.GenerativeModel('gemini-1.5-flash-8b')  # Specific model for ranking
+        self.analysis_model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')  # Model for analysis
+        self.report_model = genai.GenerativeModel('gemini-exp-1206')  # Model for final report generation
         
         # Initialize Google Custom Search
         self.search_engine = build(
@@ -418,7 +422,7 @@ class DeepResearchAgent:
         ])
 
         try:
-            response = self.model.generate_content(prompt)
+            response = self.ranking_model.generate_content(prompt)  # Use ranking specific model
             self.logger.debug(f"Ranking response:\n{response.text}")
             
             # Parse rankings and verify uniqueness
@@ -432,7 +436,7 @@ class DeepResearchAgent:
                     score = float(score)
                     
                     # Ensure score is valid
-                    if score != 1.0 and score in used_scores:
+                    if score != 1.0 and score in used_scores and score > 0.99:
                         self.logger.warning(f"Duplicate score {score} found, adjusting slightly")
                         while score in used_scores:
                             score = max(0, min(0.99, score - 0.001))
@@ -525,7 +529,7 @@ class DeepResearchAgent:
         SEARCH_QUERIES: [List complete search queries, one per line, max 10]"""
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.analysis_model.generate_content(prompt)  # Use analysis specific model
             self.logger.debug(f"Analysis response:\n{response.text}")
             
             # Parse sections
@@ -647,9 +651,8 @@ Location: {self.approximate_location}
                 search_queries = self.generate_subqueries(query, research_data)
                 self.previous_queries.update(search_queries)  # Add to previous queries after generation
             else:
-                # Subsequent iterations: get queries from analysis
-                _, _, new_queries = self.analyze_research_state(query, research_data)
-                if not new_queries:
+                # Use the search queries from the previous analysis
+                if not new_queries:  # new_queries comes from previous iteration's analysis
                     self.logger.warning("No additional search queries provided")
                     break
                 # Filter out previously used queries
@@ -707,8 +710,8 @@ Location: {self.approximate_location}
             
             research_data['iterations'].append(iteration_data)
             
-            # Analyze if more research is needed
-            need_more_research, explanation, _ = self.analyze_research_state(query, research_data)
+            # Analyze if more research is needed - store results for next iteration
+            need_more_research, explanation, new_queries = self.analyze_research_state(query, research_data)
             self.log_token_usage(explanation, "Research state analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
@@ -751,7 +754,7 @@ Location: {self.approximate_location}
         Format the report in Markdown."""
         
         try:
-            response = self.model.generate_content(prompt)
+            response = self.report_model.generate_content(prompt)  # Use report specific model
             self.logger.info("Report generated successfully")
             return response.text
         except Exception as e:
