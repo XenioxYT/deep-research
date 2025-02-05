@@ -221,7 +221,7 @@ class DeepResearchAgent:
         Guidelines:
         - Keep queries generic for current/latest things
         - Keep each query under 5-6 words
-        - Use exact phrases in quotes when needed
+        - Keep queries open ended, so they are not too specific.
         
         Format: One query per line, starting with a number."""
         
@@ -438,8 +438,6 @@ class DeepResearchAgent:
         - Likely contains detailed, relevant information
         - From authoritative or primary sources
         - Recent and up-to-date content
-        - Not a duplicate of other sources
-        - Not likely to be paywalled or restricted
         
         Format response EXACTLY as follows, one entry per line:
         [url] | [score] | [YES/NO] | [reason]
@@ -447,8 +445,10 @@ class DeepResearchAgent:
         IMPORTANT RULES:
         - All scores must be unique (no ties) and between 0 and 1.0
         - Only give 1.0 for perfect matches
-        - Aim to identify 10 high-value pages to scrape
+        - Mark YES for scraping only if the content is likely highly relevant
         - Give clear, concise reasons for scraping decisions
+        - You MUST rank ALL URLs provided, not just the top 10
+        - Provide scraping decisions for ALL URLs
         
         URLs to analyze:
         """ + "\n".join([
@@ -464,6 +464,7 @@ class DeepResearchAgent:
             rankings = {}
             used_scores = set()
             scrape_decisions = {}
+            scrape_count = 0  # Track number of URLs marked for scraping
             
             for line in response.text.strip().split('\n'):
                 try:
@@ -483,9 +484,16 @@ class DeepResearchAgent:
                     
                     used_scores.add(score)
                     rankings[url] = score
+                    
+                    # Only mark for scraping if we haven't hit our limit
+                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 10
+                    if should_scrape:
+                        scrape_count += 1
+                    
                     scrape_decisions[url] = {
-                        'should_scrape': scrape_decision.upper() == 'YES',
-                        'reason': reason
+                        'should_scrape': should_scrape,
+                        'reason': reason,
+                        'original_decision': scrape_decision.upper() == 'YES'  # Store original decision for debugging
                     }
 
                     # Track high-ranking URLs (score > 0.6)
@@ -513,13 +521,22 @@ class DeepResearchAgent:
             
             ranked_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
-            self.logger.info("Top 5 ranked URLs:")
-            for r in ranked_results[:5]:
+            # Log all ranked URLs with their decisions
+            self.logger.info(f"\nAll {len(ranked_results)} ranked URLs:")
+            for r in ranked_results:
+                decision = r['scrape_decision']
                 self.logger.info(
                     f"{r['url']} (Score: {r.get('relevance_score', 0):.3f}, "
-                    f"Scrape: {r['scrape_decision']['should_scrape']}, "
-                    f"Reason: {r['scrape_decision']['reason']})"
+                    f"Scrape: {decision['should_scrape']} "
+                    f"(Original: {decision['original_decision']}), "
+                    f"Reason: {decision['reason']})"
                 )
+            
+            # Log summary of scraping decisions
+            self.logger.info(f"\nScraping summary:")
+            self.logger.info(f"Total URLs ranked: {len(ranked_results)}")
+            self.logger.info(f"URLs marked for scraping: {scrape_count}")
+            self.logger.info(f"High-ranking URLs (score > 0.6): {len(self.high_ranking_urls)}")
             
             return ranked_results
         except Exception as e:
@@ -610,7 +627,7 @@ class DeepResearchAgent:
         REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
-        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes.]"""
+        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes. Queries should be open ended, so they are not too specific.]"""
         
         try:
             response = self.analysis_model.generate_content(prompt)  # Use analysis specific model
@@ -777,15 +794,16 @@ Location: {self.approximate_location}
         - Focus on information from high-ranking sources (score > 0.6)
         - Cross-reference information across multiple sources
         - Highlight any conflicting information found
-        - Include citation links using the source URLs
+        - Include citation links using the source URLs (using a [number] referencing a number in section 5 of the report.)
         - If you have a LOT of information, this report should be long, detailed and comprehensive.
         
         Organize the report with clear sections, including:
         1. Executive Summary
         2. Key Findings
         3. Detailed Analysis
-        4. Sources and Citations (prioritize high-ranking sources)
-        5. Research Methodology (including iterations and refinements)
+        4. Opinions on the information
+        5. Sources and Citations (prioritize high-ranking sources)
+        6. Research Methodology (including iterations and refinements)
         
         Make it detailed yet easy to understand.
         Format the report in Markdown."""
