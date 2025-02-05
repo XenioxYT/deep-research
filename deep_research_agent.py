@@ -48,12 +48,12 @@ class DeepResearchAgent:
         
         # Initialize different models for different tasks with safety settings
         self.model = genai.GenerativeModel(
-            'gemini-1.5-flash',
+            'gemini-2.0-flash-lite-preview-02-05',
             safety_settings=self.safety_settings
         )  # Default model for general tasks
         
         self.ranking_model = genai.GenerativeModel(
-            'gemini-2.0-flash-exp',
+            'gemini-2.0-flash',
             safety_settings=self.safety_settings
         )  # Specific model for ranking
         
@@ -63,7 +63,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-exp-1206',
+            'gemini-2.0-pro-exp-02-05',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
@@ -254,18 +254,46 @@ class DeepResearchAgent:
         
         try:
             response = self.model.generate_content(prompt)
+            if not response or not response.text:
+                self.logger.error("Empty response from AI model")
+                return [main_query]
+                
             self.logger.debug(f"AI Response:\n{response.text}")
             
-            subqueries = [q.strip().split('.', 1)[1].strip() 
-                         for q in response.text.split('\n') 
-                         if q.strip() and any(c.isdigit() for c in q)]
+            # Clean and validate each query
+            subqueries = []
+            for line in response.text.split('\n'):
+                line = line.strip()
+                
+                # Skip empty lines or lines without numbers
+                if not line or not any(c.isdigit() for c in line):
+                    continue
+                    
+                # Extract query after the number
+                try:
+                    # Handle different number formats (1., 1-, 1), etc.
+                    query = re.split(r'^\d+[.)-]\s*', line)[-1].strip()
+                    
+                    # Validate query
+                    if query and len(query.split()) <= 6 and len(query) >= 3:
+                        subqueries.append(query)
+                except Exception as e:
+                    self.logger.warning(f"Error processing query line '{line}': {e}")
+                    continue
             
+            # Validate final results
+            if not subqueries:
+                self.logger.warning("No valid queries generated, using main query")
+                return [main_query]
+            
+            # Limit to 10 queries and log results
+            subqueries = subqueries[:10]
             self.logger.info(f"Generated {len(subqueries)} queries:")
             for q in subqueries:
                 self.logger.info(f"Query: {q}")
             
-            # Don't add to previous_queries here, let the research method handle it
-            return subqueries[:10]
+            return subqueries
+            
         except Exception as e:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
