@@ -41,3 +41,6 @@ dr/
 # Local development settings
 .DS_Store
 Thumbs.db 
+
+# Reports
+reports/
