@@ -736,7 +736,7 @@ Location: {self.approximate_location}
         self.total_tokens = 0
         self.logger.info("Reset research state")
 
-    def save_report_streaming(self, query: str, report_generator, high_ranking_table: str):
+    def save_report_streaming(self, query: str, report_generator):
         """Save the report to a markdown file in a streaming fashion."""
         try:
             # Create reports directory if it doesn't exist
@@ -766,10 +766,6 @@ Location: {self.approximate_location}
                         f.flush()  # Ensure content is written immediately
                         # Log progress
                         self.log_token_usage(chunk.text, "Report streaming chunk")
-                
-                # Add the high-ranking sources table at the end
-                f.write(high_ranking_table)
-                f.flush()
             
             self.logger.info(f"Report saved to {filename}")
             return filename
@@ -777,7 +773,7 @@ Location: {self.approximate_location}
             self.logger.error(f"Error saving streaming report: {e}")
             return None
 
-    async def generate_report(self, main_query: str, research_data: Dict) -> Tuple[str, str]:
+    async def generate_report(self, main_query: str, research_data: Dict) -> str:
         """Generate a comprehensive report from the gathered research data with streaming output."""
         # Prepare enhanced context with high-ranking URLs and detailed source information
         high_ranking_sources = {}
@@ -798,8 +794,7 @@ Location: {self.approximate_location}
                 'score': data['score'],
                 'content': source_content,  # Full content if available
                 'domain': data['domain'],
-                'queries_used': data['source_queries'],
-                'scrape_decision': data.get('scrape_decision', {})
+                'queries_used': data['source_queries']
             }
         
         # Sort sources by score for easy reference
@@ -814,17 +809,6 @@ Location: {self.approximate_location}
             url: f"[{i+1}]" 
             for i, (url, _) in enumerate(sorted_sources)
         }
-        
-        # Create source table for high-ranking sources (>0.75)
-        high_ranking_table = "\n\n## High-Quality Sources\n\n"
-        high_ranking_table += "| # | Source | Score | Domain | Description |\n"
-        high_ranking_table += "|---|--------|--------|--------|-------------|\n"
-        
-        source_number = 1
-        for url, data in sorted_sources:
-            if data['score'] > 0.75:
-                high_ranking_table += f"| {source_number} | [{data['title']}]({url}) | {data['score']:.2f} | {data['domain']} | {data['snippet']} |\n"
-                source_number += 1
         
         report_context = {
             'main_query': main_query,
@@ -854,9 +838,15 @@ Location: {self.approximate_location}
         - Use citation numbers [X] from source_references for ALL claims
         - If sources provide different perspectives, analyze all viewpoints
         - NEVER use triple backticks (```) or code blocks in the report
-        - DO NOT include a sources section - this will be added automatically
-        - Format numbers and statistics cleanly (e.g., "$0.14" not "\\ud83d\\udcb0 0.14")
-        - Keep quotes simple and clean, without emojis or special characters
+        - Format numbers and statistics cleanly (e.g., "$0.14")
+        
+        Text Formatting Rules:
+        - Use straight quotes (") instead of curly quotes (" ")
+        - Use straight apostrophes (') instead of curly ones (')
+        - Use simple dashes (-) instead of em-dashes (—)
+        - Use standard ellipsis (...) instead of special characters (…)
+        - Avoid ALL special Unicode characters
+        - Write numbers in plain ASCII (1,234.56)
         
         Required Report Structure:
         1. Executive Summary
@@ -889,11 +879,16 @@ Location: {self.approximate_location}
            - How information was gathered and verified
            - Limitations and potential gaps
         
+        6. Sources Used
+           - List ONLY the sources that were actually cited in the report
+           - Format: [X] Title - URL
+           - Sort by citation number
+        
         Markdown Formatting Rules:
         1. Use proper header levels:
-           ## For main sections (1-5 above)
+           ## For main sections (1-6 above)
            ### For subsections
-        2. For quotes, use clean single line format:
+        2. For quotes, use clean single line format with straight quotes:
            > "This is a direct quote" [X]
         3. For lists use:
            - Bullet points
@@ -901,11 +896,7 @@ Location: {self.approximate_location}
         4. For emphasis use:
            **bold text**
            *italic text*
-        5. Format numbers consistently:
-           - Currency: $1,234.56
-           - Percentages: 12.34%
-           - Large numbers: 1,234,567
-        6. Add blank lines between sections for readability
+        5. Add blank lines between sections for readability
         
         Start the report immediately after this prompt without any additional formatting or preamble.
         Format in clean Markdown without code blocks."""
@@ -922,12 +913,10 @@ Location: {self.approximate_location}
                 }
             )
             self.logger.info("Starting report generation stream")
-            
-            # Return both the response and the high-ranking table
-            return response, high_ranking_table
+            return response
         except Exception as e:
             self.logger.error(f"Error generating streaming report: {e}")
-            return None, ""
+            return None
 
     async def research(self, query: str) -> str:
         """Main research function that coordinates the entire research process."""
@@ -1050,11 +1039,11 @@ Location: {self.approximate_location}
         
         # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
-        report_generator, high_ranking_table = await self.generate_report(query, research_data)
+        report_generator = await self.generate_report(query, research_data)
         
         if report_generator:
             # Save the streaming report and return the filename
-            report_file = self.save_report_streaming(query, report_generator, high_ranking_table)
+            report_file = self.save_report_streaming(query, report_generator)
             if report_file:
                 self.logger.info(f"Report saved to: {report_file}")
                 return f"Report has been generated and saved to: {report_file}"
