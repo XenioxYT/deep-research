@@ -645,7 +645,7 @@ class DeepResearchAgent:
             self.logger.error(f"Extraction error: {e}")
             return ""
 
-    def analyze_research_state(self, main_query: str, current_data: Dict) -> Tuple[bool, str, List[str]]:
+    def analyze_research_state(self, main_query: str, current_data: Dict) -> Tuple[bool, str, List[str], str]:
         """Analyze current research state and decide if more research is needed."""
         self.logger.info("Analyzing research state...")
         
@@ -666,13 +666,21 @@ class DeepResearchAgent:
         1. First, determine if this is a simple factual query requiring no research
         2. If research is needed, assess if current findings sufficiently answer the query
         3. Only continue research if genuinely valuable information is missing
+        4. Generate a custom report structure based on the query type and findings
         
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
         REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
-        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes. Queries should be open ended, so they are not too specific.]"""
+        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes. Queries should be open ended, so they are not too specific.]
+        REPORT_STRUCTURE: [A complete, customized report structure and guidelines based on the query type and findings. This should include:
+        1. Required sections and their order
+        2. What to include in each section
+        3. Specific formatting guidelines
+        4. How to use citations and quotes
+        5. Any special considerations for this topic
+        The structure should be tailored to the specific query type (e.g., product analysis, historical research, current events, etc.)]"""
         
         try:
             response = self.analysis_model.generate_content(prompt)  # Use analysis specific model
@@ -683,6 +691,7 @@ class DeepResearchAgent:
             blacklist = []
             missing = []
             search_queries = []
+            report_structure = ""
             current_section = None
             
             for line in response.text.split('\n'):
@@ -700,6 +709,8 @@ class DeepResearchAgent:
                     current_section = "MISSING"
                 elif line.startswith("SEARCH_QUERIES:"):
                     current_section = "SEARCH_QUERIES"
+                elif line.startswith("REPORT_STRUCTURE:"):
+                    current_section = "REPORT_STRUCTURE"
                 elif line.startswith("REASON:"):  # Add reason to explanation
                     explanation = line.split(":", 1)[1].strip()
                     current_section = None
@@ -713,10 +724,14 @@ class DeepResearchAgent:
                         # Handle multiple query formats
                         if line.startswith('- '):
                             search_queries.append(line[2:].strip())
-                        elif line.strip() and not line.startswith(('DECISION:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:')):
+                        elif line.strip() and not line.startswith(('DECISION:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:')):
                             # Handle numbered or plain queries
                             clean_query = line.split('. ', 1)[-1] if '. ' in line else line
                             search_queries.append(clean_query.strip())
+                    elif current_section == "REPORT_STRUCTURE":
+                        if report_structure:
+                            report_structure += "\n"
+                        report_structure += line
             
             # Update blacklist
             self.blacklisted_urls.update(blacklist)
@@ -727,10 +742,10 @@ class DeepResearchAgent:
             if search_queries:
                 explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
             
-            return decision, explanation, search_queries
+            return decision, explanation, search_queries, report_structure
         except Exception as e:
             self.logger.error(f"Analysis error: {e}")
-            return False, str(e), []
+            return False, str(e), [], ""
 
     def save_report(self, query: str, report: str):
         """Save the report to a markdown file."""
@@ -826,7 +841,7 @@ Location: {self.approximate_location}
             self.logger.error(f"Error saving streaming report: {e}")
             return None
 
-    async def generate_report(self, main_query: str, research_data: Dict) -> Tuple[str, str]:
+    async def generate_report(self, main_query: str, research_data: Dict, report_structure: str) -> Tuple[str, str]:
         """Generate a comprehensive report from the gathered research data with streaming output."""
         max_retries = 3
         base_delay = 2  # Base delay in seconds
@@ -895,18 +910,8 @@ Location: {self.approximate_location}
                 Using the following information:
                 {json.dumps(report_context, indent=2)}
                 
-                Important Guidelines:
-                - This should be a DETAILED, COMPREHENSIVE report using ALL available information
-                - Use ALL high-ranking sources (score > 0.6) in your analysis
-                - Cross-reference and compare information across multiple sources
-                - Highlight agreements and contradictions between sources
-                - Include direct quotes when they add value, using proper citation numbers
-                - Use citation numbers [X] from source_references for ALL claims
-                - If sources provide different perspectives, analyze all viewpoints
-                - NEVER use triple backticks (```) or code blocks in the report
-                - Format numbers and statistics cleanly (e.g., "$0.14")
-                - Break up long sections into smaller, focused subsections
-                - Use bullet points and lists for better readability
+                Follow this custom report structure and guidelines:
+                {report_structure}
                 
                 Text Formatting Rules:
                 - Use straight quotes (") instead of curly quotes (" ")
@@ -915,52 +920,6 @@ Location: {self.approximate_location}
                 - Use standard ellipsis (...) instead of special characters (…)
                 - Avoid ALL special Unicode characters
                 - Write numbers in plain ASCII (1,234.56)
-                
-                Required Report Structure:
-                1. Executive Summary
-                   - Brief overview of findings
-                   - Key conclusions
-                   - Scope of research
-                
-                2. Key Findings
-                   - Major discoveries
-                   - Important statistics
-                   - Critical insights
-                   - Each finding must cite sources
-                
-                3. Detailed Analysis
-                   - Break into relevant subsections
-                   - In-depth examination of all aspects
-                   - Compare and contrast different sources
-                   - Include relevant quotes with citations
-                   - Analyze trends and patterns
-                   - Discuss implications
-                
-                4. Expert Opinions and Market Response
-                   - Expert viewpoints from sources
-                   - Market implications if relevant
-                   - Industry response and reactions
-                   - Future predictions or expectations
-                
-                5. Research Methodology
-                   - Detail the research process
-                   - Queries used in each iteration
-                   - How information was gathered and verified
-                   - Limitations and potential gaps
-                
-                Markdown Formatting Rules:
-                1. Use proper header levels:
-                   ## For main sections (1-5 above)
-                   ### For subsections
-                2. For quotes, use clean single line format with straight quotes:
-                   > "This is a direct quote" [X]
-                3. For lists use:
-                   - Bullet points
-                   1. Numbered points
-                4. For emphasis use:
-                   **bold text**
-                   *italic text*
-                5. Add blank lines between sections for readability
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks.
@@ -1024,6 +983,9 @@ Location: {self.approximate_location}
             'iterations': [],
             'final_sources': []
         }
+        
+        # Store the latest report structure
+        latest_report_structure = ""
         
         while self.research_iterations < self.MAX_ITERATIONS:
             self.logger.info(f"Starting research iteration {self.research_iterations + 1}")
@@ -1114,8 +1076,13 @@ Location: {self.approximate_location}
             }
             
             # Analyze if more research is needed - store results for next iteration
-            need_more_research, explanation, new_queries = self.analyze_research_state(query, analysis_context)
+            need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(query, analysis_context)
             self.log_token_usage(explanation, "Research state analysis")
+            
+            # Always update the latest report structure
+            if report_structure:
+                latest_report_structure = report_structure
+                self.logger.info("Updated report structure based on latest analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
                 self.logger.info(f"More research needed:\n{explanation}")
@@ -1131,9 +1098,9 @@ Location: {self.approximate_location}
         if not research_data['final_sources']:
             return "Error: No valid information could be gathered. Please try again or modify the query."
         
-        # Generate and save streaming report
+        # Generate and save streaming report using the latest report structure
         self.logger.info("Generating final report with streaming...")
-        report_generator, sources_used = await self.generate_report(query, research_data)
+        report_generator, sources_used = await self.generate_report(query, research_data, latest_report_structure)
         
         if report_generator:
             # Save the streaming report and return the filename
