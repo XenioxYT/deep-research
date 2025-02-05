@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import aiohttp
 from functools import partial
 import httplib2
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 class DeepResearchAgent:
     def __init__(self):
@@ -918,12 +919,12 @@ Location: {self.approximate_location}
         DO NOT include a sources section - it will be added automatically."""
         
         try:
-            # Generate streaming response with safety settings
+            # Generate streaming response with proper safety settings
             safety_settings = {
-                "HARASSMENT": "block_none",
-                "HATE_SPEECH": "block_none",
-                "SEXUALLY_EXPLICIT": "block_none",
-                "DANGEROUS_CONTENT": "block_none",
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
             }
             
             response = self.report_model.generate_content(
@@ -933,7 +934,6 @@ Location: {self.approximate_location}
                     'temperature': 0.7,  # Slightly increase creativity
                     'top_p': 0.9,  # More diverse output
                     'max_output_tokens': 8192,  # Increased for longer reports
-                    'candidate_count': 1,
                 },
                 safety_settings=safety_settings
             )
