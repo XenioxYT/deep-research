@@ -686,6 +686,89 @@ Location: {self.approximate_location}
         self.total_tokens = 0
         self.logger.info("Reset research state")
 
+    def save_report_streaming(self, query: str, report_generator):
+        """Save the report to a markdown file in a streaming fashion."""
+        try:
+            # Create reports directory if it doesn't exist
+            os.makedirs('reports', exist_ok=True)
+            
+            # Clean query for filename
+            clean_query = re.sub(r'[^\w\s-]', '', query).strip().lower()
+            clean_query = re.sub(r'[-\s]+', '-', clean_query)
+            
+            # Create filename with date
+            filename = f"reports/{clean_query}-{self.current_date}.md"
+            
+            # Write header first
+            header = f"""# Research Report: {query}
+Date: {self.current_date}
+Location: {self.approximate_location}
+
+"""
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(header)
+            
+            # Stream the rest of the content
+            with open(filename, 'a', encoding='utf-8') as f:
+                for chunk in report_generator:
+                    if chunk.text:
+                        f.write(chunk.text)
+                        f.flush()  # Ensure content is written immediately
+                        # Log progress
+                        self.log_token_usage(chunk.text, "Report streaming chunk")
+            
+            self.logger.info(f"Report saved to {filename}")
+            return filename
+        except Exception as e:
+            self.logger.error(f"Error saving streaming report: {e}")
+            return None
+
+    async def generate_report(self, main_query: str, research_data: Dict) -> str:
+        """Generate a comprehensive report from the gathered research data with streaming output."""
+        # Prepare enhanced context with high-ranking URLs
+        report_context = {
+            'main_query': main_query,
+            'research_data': research_data,
+            'high_ranking_sources': self.high_ranking_urls,
+            'total_sources_analyzed': len(self.all_results),
+            'total_high_ranking_sources': len(self.high_ranking_urls),
+            'research_iterations': self.research_iterations,
+            'total_queries_used': len(self.previous_queries)
+        }
+        
+        prompt = f"""Generate a comprehensive research report on: '{main_query}'
+        Using the following information:
+        {json.dumps(report_context, indent=2)}
+        
+        Important Guidelines:
+        - Focus on information from high-ranking sources (score > 0.6)
+        - Cross-reference information across multiple sources
+        - Highlight any conflicting information found
+        - Include citation links using the source URLs
+        - If you have a LOT of information, this report should be long, detailed and comprehensive.
+        
+        Organize the report with clear sections, including:
+        1. Executive Summary
+        2. Key Findings
+        3. Detailed Analysis
+        4. Sources and Citations (prioritize high-ranking sources)
+        5. Research Methodology (including iterations and refinements)
+        
+        Make it detailed yet easy to understand.
+        Format the report in Markdown."""
+        
+        try:
+            # Generate streaming response
+            response = self.report_model.generate_content(
+                prompt,
+                stream=True  # Enable streaming
+            )
+            self.logger.info("Starting report generation stream")
+            return response
+        except Exception as e:
+            self.logger.error(f"Error generating streaming report: {e}")
+            return None
+
     async def research(self, query: str) -> str:
         """Main research function that coordinates the entire research process."""
         # Reset state for new query
@@ -799,65 +882,27 @@ Location: {self.approximate_location}
         if not research_data['final_sources']:
             return "Error: No valid information could be gathered. Please try again or modify the query."
         
-        # Generate and save report
-        self.logger.info("Generating final report...")
-        report = self.generate_report(query, research_data)
-        self.log_token_usage(report, "Final report generation")
-        self.save_report(query, report)
+        # Generate and save streaming report
+        self.logger.info("Generating final report with streaming...")
+        report_generator = await self.generate_report(query, research_data)
         
-        self.logger.info(f"Total tokens used in research: {self.total_tokens}")
-        return report
-
-    def generate_report(self, main_query: str, research_data: Dict) -> str:
-        """Generate a comprehensive report from the gathered research data."""
-        # Prepare enhanced context with high-ranking URLs
-        report_context = {
-            'main_query': main_query,
-            'research_data': research_data,
-            'high_ranking_sources': self.high_ranking_urls,
-            'total_sources_analyzed': len(self.all_results),
-            'total_high_ranking_sources': len(self.high_ranking_urls),
-            'research_iterations': self.research_iterations,
-            'total_queries_used': len(self.previous_queries)
-        }
+        if report_generator:
+            # Save the streaming report and return the filename
+            report_file = self.save_report_streaming(query, report_generator)
+            if report_file:
+                self.logger.info(f"Report saved to: {report_file}")
+                return f"Report has been generated and saved to: {report_file}"
         
-        prompt = f"""Generate a comprehensive research report on: '{main_query}'
-        Using the following information:
-        {json.dumps(report_context, indent=2)}
-        
-        Important Guidelines:
-        - Focus on information from high-ranking sources (score > 0.6)
-        - Cross-reference information across multiple sources
-        - Highlight any conflicting information found
-        - Include citation links using the source URLs
-        - If you have a LOT of information, this report should be long, detailed and comprehensive.
-        
-        Organize the report with clear sections, including:
-        1. Executive Summary
-        2. Key Findings
-        3. Detailed Analysis
-        4. Sources and Citations (prioritize high-ranking sources)
-        5. Research Methodology (including iterations and refinements)
-        
-        Make it detailed yet easy to understand.
-        Format the report in Markdown."""
-        
-        try:
-            response = self.report_model.generate_content(prompt)  # Use report specific model
-            self.logger.info("Report generated successfully")
-            return response.text
-        except Exception as e:
-            self.logger.error(f"Error generating report: {e}")
-            return f"Error generating report. Please try again.\nError: {str(e)}"
+        return "Error: Failed to generate report. Please try again."
 
 def main():
     """Run the research agent with proper async handling."""
     async def run_research():
         async with DeepResearchAgent() as agent:
             query = input("Enter your research query: ")
-            report = await agent.research(query)
-            print("\nResearch Report:")
-            print(report)
+            result = await agent.research(query)
+            print("\nResearch Result:")
+            print(result)
 
     asyncio.run(run_research())
 
