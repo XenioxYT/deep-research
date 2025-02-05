@@ -838,6 +838,7 @@ Location: {self.approximate_location}
         - Include direct quotes when they add value, using proper citation numbers
         - Use citation numbers [X] from source_references for ALL claims
         - If sources provide different perspectives, analyze all viewpoints
+        - NEVER use triple backticks (```) or code blocks in the report
         
         Required Report Structure:
         1. Executive Summary
@@ -876,15 +877,24 @@ Location: {self.approximate_location}
            - How information was gathered and verified
            - Limitations and potential gaps
         
-        Make it detailed, thorough, and well-structured.
-        Use proper Markdown formatting including:
-        - Headers (##, ###)
-        - Lists (- or 1.)
-        - Blockquotes (>) for important quotes
-        - **Bold** for emphasis
-        - Proper spacing between sections
+        Markdown Formatting Rules:
+        1. Use proper header levels:
+           # Title (already added)
+           ## For main sections (1-6 above)
+           ### For subsections
+        2. For quotes, use single line > without code blocks:
+           > This is a quote [X]
+        3. For lists use:
+           - Bullet points
+           1. Numbered points
+        4. For emphasis use:
+           **bold text**
+           *italic text*
+        5. NEVER use triple backticks (```) or code blocks
+        6. Add blank lines between sections for readability
         
-        Format the report in Markdown."""
+        Start the report immediately after this prompt without any additional formatting or preamble.
+        Format in clean Markdown without code blocks."""
         
         try:
             # Generate streaming response
