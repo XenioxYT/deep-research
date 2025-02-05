@@ -38,7 +38,7 @@ class DeepResearchAgent:
         genai.configure(api_key=os.getenv('GOOGLE_AI_KEY'))
         # Initialize different models for different tasks
         self.model = genai.GenerativeModel('gemini-1.5-flash')  # Default model for general tasks
-        self.ranking_model = genai.GenerativeModel('gemini-1.5-flash-8b')  # Specific model for ranking
+        self.ranking_model = genai.GenerativeModel('gemini-1.5-flash')  # Specific model for ranking
         self.analysis_model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')  # Model for analysis
         self.report_model = genai.GenerativeModel('gemini-exp-1206')  # Model for final report generation
         
@@ -52,6 +52,7 @@ class DeepResearchAgent:
         # Research state
         self.previous_queries = set()  # Changed to set for uniqueness
         self.all_results = {}
+        self.high_ranking_urls = {}  # Track URLs with score > 0.6
         self.blacklisted_urls = set()
         self.scraped_urls = set()  # Track already scraped URLs
         self.research_iterations = 0
@@ -185,6 +186,17 @@ class DeepResearchAgent:
         parsed = urlparse(url)
         return any(yt in parsed.netloc for yt in ['youtube.com', 'youtu.be'])
 
+    def rewrite_url(self, url: str) -> str:
+        """Rewrite URLs based on defined rules."""
+        parsed = urlparse(url)
+        
+        # Reddit URL rewrite
+        if 'reddit.com' in parsed.netloc:
+            # Replace reddit.com with rl.bloat.cat while keeping the rest of the URL structure
+            return url.replace('reddit.com', 'redlib.kylrth.com/')
+            
+        return url
+
     def should_skip_url(self, url: str) -> bool:
         """Check if URL should be skipped."""
         return (
@@ -204,11 +216,10 @@ class DeepResearchAgent:
         
         prompt = f"""{self.system_context}
         {context}Given the main query: '{main_query}', generate 5-10 short, focused search queries 
-        that would be effective for Google search. Use Google search operators where appropriate.
+        that would be effective for Google search.
         
         Guidelines:
-        - Keep queries generic for current/latest things (e.g., "latest fortnite season" not "fortnite chapter X season Y")
-        - Use site-specific searches (e.g., site:epicgames.com)
+        - Keep queries generic for current/latest things
         - Keep each query under 5-6 words
         - Use exact phrases in quotes when needed
         
@@ -268,7 +279,7 @@ class DeepResearchAgent:
                                     
                                 result = {
                                     'title': item.get('title', ''),
-                                    'url': url,
+                                    'url': url,  # Remove rewrite, use original URL
                                     'snippet': item.get('snippet', ''),
                                     'domain': item.get('displayLink', ''),
                                     'source_queries': [query]
@@ -349,13 +360,31 @@ class DeepResearchAgent:
                 # Simple content extraction
                 content = await page.evaluate("""
                     () => {
+                        // Try to get main content first
                         const article = document.querySelector('article, [role="main"], main, .content, .post');
-                        if (article) return article.innerText;
+                        if (article) {
+                            const text = article.innerText;
+                            if (text.length >= 100) return text;
+                        }
                         
-                        const paragraphs = Array.from(document.querySelectorAll('p')).map(p => p.innerText).join('\\n\\n');
-                        if (paragraphs.length > 100) return paragraphs;
+                        // If no main content, get all meaningful text
+                        const textContent = [];
+                        const elements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, div > text');
                         
-                        return document.body.innerText;
+                        elements.forEach(elem => {
+                            // Skip if element is hidden or part of navigation/footer
+                            const style = window.getComputedStyle(elem);
+                            if (style.display === 'none' || style.visibility === 'hidden') return;
+                            if (elem.closest('nav, footer, header, aside')) return;
+                            
+                            const text = elem.innerText.trim();
+                            // Only add if text is meaningful (not just a number or single word)
+                            if (text.length >= 20 || (text.includes(' ') && text.length >= 10)) {
+                                textContent.push(text);
+                            }
+                        });
+                        
+                        return textContent.join('\\n\\n');
                     }
                 """)
                 
@@ -391,15 +420,15 @@ class DeepResearchAgent:
         results = await asyncio.gather(*tasks)
         return dict(results)
 
-    def rank_all_results(self, main_query: str) -> List[Dict]:
-        """Rank all collected results based on relevance using AI."""
-        if not self.all_results:
+    def rank_new_results(self, main_query: str, new_results: List[Dict]) -> List[Dict]:
+        """Rank only new search results based on relevance using AI."""
+        if not new_results:
             return []
 
-        self.logger.info(f"Ranking {len(self.all_results)} unique URLs")
+        self.logger.info(f"Ranking {len(new_results)} new URLs")
 
         prompt = f"""{self.system_context}
-        For the query '{main_query}', rank these search results by relevance.
+        For the query '{main_query}', rank these new search results by relevance.
         Respond with ONLY scores (0-0.99) for each URL, one per line.
         IMPORTANT RULES:
         - Only give a score of 1.0 if the content PERFECTLY matches the query intent
@@ -417,12 +446,11 @@ class DeepResearchAgent:
         URLs to rank:
         """ + "\n".join([
             f"{data['url']}\nTitle: {data['title']}\nSnippet: {data['snippet']}"
-            for data in self.all_results.values()
-            if data['url'] not in self.blacklisted_urls
+            for data in new_results
         ])
 
         try:
-            response = self.ranking_model.generate_content(prompt)  # Use ranking specific model
+            response = self.ranking_model.generate_content(prompt)
             self.logger.debug(f"Ranking response:\n{response.text}")
             
             # Parse rankings and verify uniqueness
@@ -443,28 +471,54 @@ class DeepResearchAgent:
                     
                     used_scores.add(score)
                     rankings[url] = score
+
+                    # Track high-ranking URLs (score > 0.6)
+                    if score > 0.6:
+                        result = next((r for r in new_results if r['url'] == url), None)
+                        if result:
+                            self.high_ranking_urls[url] = {
+                                'score': score,
+                                'title': result['title'],
+                                'snippet': result['snippet'],
+                                'domain': result['domain'],
+                                'source_queries': result['source_queries']
+                            }
                 except (ValueError, IndexError):
                     continue
             
             # Update scores and sort results
-            for url, score in rankings.items():
-                if url in self.all_results:
-                    self.all_results[url]['relevance_score'] = score
+            ranked_results = []
+            for result in new_results:
+                if result['url'] in rankings:
+                    result['relevance_score'] = rankings[result['url']]
+                    ranked_results.append(result)
             
-            ranked_results = sorted(
-                [r for r in self.all_results.values() if r['url'] not in self.blacklisted_urls],
-                key=lambda x: x.get('relevance_score', 0),
-                reverse=True
-            )
+            ranked_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
-            self.logger.info("Top 5 ranked URLs:")
+            self.logger.info("Top 5 ranked new URLs:")
             for r in ranked_results[:5]:
                 self.logger.info(f"{r['url']} (Score: {r.get('relevance_score', 0):.3f})")
             
             return ranked_results
         except Exception as e:
             self.logger.error(f"Ranking error: {e}")
-            return [r for r in self.all_results.values() if r['url'] not in self.blacklisted_urls]
+            return new_results
+
+    def rank_all_results(self, main_query: str) -> List[Dict]:
+        """Get all results sorted by their existing ranking scores."""
+        if not self.all_results:
+            return []
+
+        self.logger.info(f"Getting all {len(self.all_results)} ranked results")
+        
+        # Simply sort by existing scores
+        ranked_results = sorted(
+            [r for r in self.all_results.values() if r['url'] not in self.blacklisted_urls],
+            key=lambda x: x.get('relevance_score', 0),
+            reverse=True
+        )
+        
+        return ranked_results
 
     def extract_content(self, url: str) -> str:
         """Extract main content from a webpage using Playwright."""
@@ -519,8 +573,10 @@ class DeepResearchAgent:
         Also identify any URLs that should be blacklisted (irrelevant, outdated, etc.).
         
         If more research is needed, provide up to 10 COMPLETE search queries that would help fill the gaps.
-        These should be actual search queries ready to be used (including any search operators etc.).
+        These should be actual search queries ready to be used. Keep them simple.
         Make sure to relate the queries to the main query to find extra information about the topic and the results you have already found.
+        
+        Say NO at any time to end the research and produce a final report. You should be saying NO when the original query is answered, or when you have gathered enough information.
         
         Format response EXACTLY as follows:
         DECISION: [YES/NO]
@@ -623,6 +679,7 @@ Location: {self.approximate_location}
         """Reset all state tracking for a new query."""
         self.previous_queries = set()
         self.all_results = {}
+        self.high_ranking_urls = {}
         self.blacklisted_urls = set()
         self.scraped_urls = set()
         self.research_iterations = 0
@@ -671,16 +728,11 @@ Location: {self.approximate_location}
                 self.logger.warning("No search results found")
                 break
             
-            # Update all_results with new search results
-            for result in search_results:
-                if result['url'] not in self.all_results:
-                    self.all_results[result['url']] = result
-            
-            # Rank all collected results
-            ranked_results = self.rank_all_results(query)
+            # Rank new results before adding to all_results
+            ranked_new_results = self.rank_new_results(query, search_results)
             
             # Filter out already scraped URLs and get top 8
-            new_urls = [r for r in ranked_results if r['url'] not in self.scraped_urls][:8]
+            new_urls = [r for r in ranked_new_results if r['url'] not in self.scraped_urls][:8]
             if not new_urls:
                 self.logger.warning("No new URLs to scrape")
                 break
@@ -699,19 +751,38 @@ Location: {self.approximate_location}
                 content = contents.get(url, '')
                 if content:
                     self.scraped_urls.add(url)  # Mark as scraped
+                    
+                    # Apply URL rewrite after content extraction
+                    rewritten_url = self.rewrite_url(url)
+                    
                     finding = {
-                        'source': url,
-                        'content': content[:4000],
+                        'source': rewritten_url,
+                        'content': content[:6000],
                         'relevance_score': result.get('relevance_score', 0)
                     }
                     iteration_data['findings'].append(finding)
                     research_data['final_sources'].append(finding)
-                    self.log_token_usage(content[:4000], f"Content from {url}")
+                    self.log_token_usage(content[:6000], f"Content from {url}")
+                    
+                    # Add to all_results after successful scraping
+                    result['url'] = rewritten_url  # Update URL to rewritten version
+                    self.all_results[rewritten_url] = result
             
             research_data['iterations'].append(iteration_data)
             
+            # Create comprehensive analysis context
+            analysis_context = {
+                'main_query': query,
+                'current_iteration': self.research_iterations,
+                'previous_queries': list(self.previous_queries),
+                'high_ranking_urls': self.high_ranking_urls,
+                'current_findings': iteration_data['findings'],
+                'all_iterations': research_data['iterations'],
+                'total_sources': len(research_data['final_sources'])
+            }
+            
             # Analyze if more research is needed - store results for next iteration
-            need_more_research, explanation, new_queries = self.analyze_research_state(query, research_data)
+            need_more_research, explanation, new_queries = self.analyze_research_state(query, analysis_context)
             self.log_token_usage(explanation, "Research state analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
@@ -739,15 +810,33 @@ Location: {self.approximate_location}
 
     def generate_report(self, main_query: str, research_data: Dict) -> str:
         """Generate a comprehensive report from the gathered research data."""
+        # Prepare enhanced context with high-ranking URLs
+        report_context = {
+            'main_query': main_query,
+            'research_data': research_data,
+            'high_ranking_sources': self.high_ranking_urls,
+            'total_sources_analyzed': len(self.all_results),
+            'total_high_ranking_sources': len(self.high_ranking_urls),
+            'research_iterations': self.research_iterations,
+            'total_queries_used': len(self.previous_queries)
+        }
+        
         prompt = f"""Generate a comprehensive research report on: '{main_query}'
         Using the following information:
-        {json.dumps(research_data, indent=2)}
+        {json.dumps(report_context, indent=2)}
+        
+        Important Guidelines:
+        - Focus on information from high-ranking sources (score > 0.6)
+        - Cross-reference information across multiple sources
+        - Highlight any conflicting information found
+        - Include citation links using the source URLs
+        - If you have a LOT of information, this report should be long, detailed and comprehensive.
         
         Organize the report with clear sections, including:
         1. Executive Summary
         2. Key Findings
         3. Detailed Analysis
-        4. Sources and Citations
+        4. Sources and Citations (prioritize high-ranking sources)
         5. Research Methodology (including iterations and refinements)
         
         Make it detailed yet easy to understand.
