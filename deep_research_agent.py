@@ -736,7 +736,7 @@ Location: {self.approximate_location}
         self.total_tokens = 0
         self.logger.info("Reset research state")
 
-    def save_report_streaming(self, query: str, report_generator):
+    def save_report_streaming(self, query: str, report_generator, sources_used: str):
         """Save the report to a markdown file in a streaming fashion."""
         try:
             # Create reports directory if it doesn't exist
@@ -760,12 +760,20 @@ Location: {self.approximate_location}
             
             # Stream the report content
             with open(filename, 'a', encoding='utf-8') as f:
-                for chunk in report_generator:
-                    if chunk.text:
-                        f.write(chunk.text)
-                        f.flush()  # Ensure content is written immediately
-                        # Log progress
-                        self.log_token_usage(chunk.text, "Report streaming chunk")
+                try:
+                    for chunk in report_generator:
+                        if chunk and chunk.text:  # Check both chunk and text exist
+                            clean_text = chunk.text.encode('ascii', 'ignore').decode()  # Remove non-ASCII chars
+                            f.write(clean_text)
+                            f.flush()  # Ensure content is written immediately
+                            # Log progress
+                            self.log_token_usage(clean_text, "Report streaming chunk")
+                except Exception as e:
+                    self.logger.error(f"Error during streaming: {e}")
+                
+                # Add the sources section at the end
+                f.write(sources_used)
+                f.flush()
             
             self.logger.info(f"Report saved to {filename}")
             return filename
@@ -773,7 +781,7 @@ Location: {self.approximate_location}
             self.logger.error(f"Error saving streaming report: {e}")
             return None
 
-    async def generate_report(self, main_query: str, research_data: Dict) -> str:
+    async def generate_report(self, main_query: str, research_data: Dict) -> Tuple[str, str]:
         """Generate a comprehensive report from the gathered research data with streaming output."""
         # Prepare enhanced context with high-ranking URLs and detailed source information
         high_ranking_sources = {}
@@ -810,6 +818,14 @@ Location: {self.approximate_location}
             for i, (url, _) in enumerate(sorted_sources)
         }
         
+        # Create source list for the report
+        sources_used = "\n\n## Sources Used\n\n"
+        for i, (url, data) in enumerate(sorted_sources, 1):
+            sources_used += f"[{i}] {data['title']}\n"
+            sources_used += f"- URL: {url}\n"
+            sources_used += f"- Relevance Score: {data['score']:.2f}\n"
+            sources_used += f"- Domain: {data['domain']}\n\n"
+        
         report_context = {
             'main_query': main_query,
             'research_data': research_data,
@@ -839,6 +855,8 @@ Location: {self.approximate_location}
         - If sources provide different perspectives, analyze all viewpoints
         - NEVER use triple backticks (```) or code blocks in the report
         - Format numbers and statistics cleanly (e.g., "$0.14")
+        - Break up long sections into smaller, focused subsections
+        - Use bullet points and lists for better readability
         
         Text Formatting Rules:
         - Use straight quotes (") instead of curly quotes (" ")
@@ -861,6 +879,7 @@ Location: {self.approximate_location}
            - Each finding must cite sources
         
         3. Detailed Analysis
+           - Break into relevant subsections
            - In-depth examination of all aspects
            - Compare and contrast different sources
            - Include relevant quotes with citations
@@ -879,14 +898,9 @@ Location: {self.approximate_location}
            - How information was gathered and verified
            - Limitations and potential gaps
         
-        6. Sources Used
-           - List ONLY the sources that were actually cited in the report
-           - Format: [X] Title - URL
-           - Sort by citation number
-        
         Markdown Formatting Rules:
         1. Use proper header levels:
-           ## For main sections (1-6 above)
+           ## For main sections (1-5 above)
            ### For subsections
         2. For quotes, use clean single line format with straight quotes:
            > "This is a direct quote" [X]
@@ -899,24 +913,39 @@ Location: {self.approximate_location}
         5. Add blank lines between sections for readability
         
         Start the report immediately after this prompt without any additional formatting or preamble.
-        Format in clean Markdown without code blocks."""
+        Format in clean Markdown without code blocks.
+        
+        DO NOT include a sources section - it will be added automatically."""
         
         try:
-            # Generate streaming response
+            # Generate streaming response with safety settings
+            safety_settings = {
+                "HARASSMENT": "block_none",
+                "HATE_SPEECH": "block_none",
+                "SEXUALLY_EXPLICIT": "block_none",
+                "DANGEROUS_CONTENT": "block_none",
+            }
+            
             response = self.report_model.generate_content(
                 prompt,
                 stream=True,  # Enable streaming
                 generation_config={
                     'temperature': 0.7,  # Slightly increase creativity
                     'top_p': 0.9,  # More diverse output
-                    'max_output_tokens': 8192  # Increased for longer reports
-                }
+                    'max_output_tokens': 8192,  # Increased for longer reports
+                    'candidate_count': 1,
+                },
+                safety_settings=safety_settings
             )
+            
             self.logger.info("Starting report generation stream")
-            return response
+            
+            # Return both the response and sources section
+            return response, sources_used
+            
         except Exception as e:
             self.logger.error(f"Error generating streaming report: {e}")
-            return None
+            return None, ""
 
     async def research(self, query: str) -> str:
         """Main research function that coordinates the entire research process."""
@@ -1039,11 +1068,11 @@ Location: {self.approximate_location}
         
         # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
-        report_generator = await self.generate_report(query, research_data)
+        report_generator, sources_used = await self.generate_report(query, research_data)
         
         if report_generator:
             # Save the streaming report and return the filename
-            report_file = self.save_report_streaming(query, report_generator)
+            report_file = self.save_report_streaming(query, report_generator, sources_used)
             if report_file:
                 self.logger.info(f"Report saved to: {report_file}")
                 return f"Report has been generated and saved to: {report_file}"
