@@ -37,11 +37,35 @@ class DeepResearchAgent:
         system_context += "For queries about current/latest things, use generic search terms without specific versions/numbers."
         
         genai.configure(api_key=os.getenv('GOOGLE_AI_KEY'))
-        # Initialize different models for different tasks
-        self.model = genai.GenerativeModel('gemini-1.5-flash')  # Default model for general tasks
-        self.ranking_model = genai.GenerativeModel('gemini-1.5-flash')  # Specific model for ranking
-        self.analysis_model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')  # Model for analysis
-        self.report_model = genai.GenerativeModel('gemini-exp-1206')  # Model for final report generation
+        
+        # Define common safety settings for all models
+        self.safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        
+        # Initialize different models for different tasks with safety settings
+        self.model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            safety_settings=self.safety_settings
+        )  # Default model for general tasks
+        
+        self.ranking_model = genai.GenerativeModel(
+            'gemini-2.0-flash-exp',
+            safety_settings=self.safety_settings
+        )  # Specific model for ranking
+        
+        self.analysis_model = genai.GenerativeModel(
+            'gemini-2.0-flash-thinking-exp-01-21',
+            safety_settings=self.safety_settings
+        )  # Model for analysis
+        
+        self.report_model = genai.GenerativeModel(
+            'gemini-exp-1206',
+            safety_settings=self.safety_settings
+        )  # Model for final report generation
         
         # Initialize Google Custom Search
         self.search_engine = build(
@@ -463,7 +487,6 @@ class DeepResearchAgent:
             
             # Parse rankings and verify uniqueness
             rankings = {}
-            used_scores = set()
             scrape_decisions = {}
             scrape_count = 0  # Track number of URLs marked for scraping
             
@@ -477,13 +500,6 @@ class DeepResearchAgent:
                     url, score_str, scrape_decision, reason = parts
                     score = float(score_str)
                     
-                    # Ensure score is valid
-                    if score != 1.0 and score in used_scores:
-                        self.logger.warning(f"Duplicate score {score} found, adjusting slightly")
-                        while score in used_scores:
-                            score = max(0, min(0.99, score - 0.001))
-                    
-                    used_scores.add(score)
                     rankings[url] = score
                     
                     # Only mark for scraping if we haven't hit our limit
@@ -784,168 +800,189 @@ Location: {self.approximate_location}
 
     async def generate_report(self, main_query: str, research_data: Dict) -> Tuple[str, str]:
         """Generate a comprehensive report from the gathered research data with streaming output."""
-        # Prepare enhanced context with high-ranking URLs and detailed source information
-        high_ranking_sources = {}
-        for url, data in self.high_ranking_urls.items():
-            # Find the full content from research_data
-            source_content = None
-            for iteration in research_data['iterations']:
-                for finding in iteration['findings']:
-                    if finding['source'] == url:
-                        source_content = finding['content']
-                        break
-                if source_content:
-                    break
-            
-            high_ranking_sources[url] = {
-                'title': data['title'],
-                'snippet': data['snippet'],
-                'score': data['score'],
-                'content': source_content,  # Full content if available
-                'domain': data['domain'],
-                'queries_used': data['source_queries']
-            }
+        max_retries = 3
+        base_delay = 2  # Base delay in seconds
         
-        # Sort sources by score for easy reference
-        sorted_sources = sorted(
-            high_ranking_sources.items(),
-            key=lambda x: x[1]['score'],
-            reverse=True
-        )
+        for attempt in range(max_retries):
+            try:
+                # Prepare enhanced context with high-ranking URLs and detailed source information
+                high_ranking_sources = {}
+                for url, data in self.high_ranking_urls.items():
+                    # Find the full content from research_data
+                    source_content = None
+                    for iteration in research_data['iterations']:
+                        for finding in iteration['findings']:
+                            if finding['source'] == url:
+                                source_content = finding['content']
+                                break
+                        if source_content:
+                            break
+                    
+                    high_ranking_sources[url] = {
+                        'title': data['title'],
+                        'snippet': data['snippet'],
+                        'score': data['score'],
+                        'content': source_content,  # Full content if available
+                        'domain': data['domain'],
+                        'queries_used': data['source_queries']
+                    }
+                
+                # Sort sources by score for easy reference
+                sorted_sources = sorted(
+                    high_ranking_sources.items(),
+                    key=lambda x: x[1]['score'],
+                    reverse=True
+                )
+                
+                # Create numbered references for citations
+                source_references = {
+                    url: f"[{i+1}]" 
+                    for i, (url, _) in enumerate(sorted_sources)
+                }
+                
+                # Create source list for the report
+                sources_used = "\n\n## Sources Used\n\n"
+                for i, (url, data) in enumerate(sorted_sources, 1):
+                    sources_used += f"[{i}] {data['title']}\n"
+                    sources_used += f"- URL: {url}\n"
+                    sources_used += f"- Relevance Score: {data['score']:.2f}\n"
+                    sources_used += f"- Domain: {data['domain']}\n\n"
+                
+                report_context = {
+                    'main_query': main_query,
+                    'research_data': research_data,
+                    'high_ranking_sources': dict(sorted_sources),  # Ordered by score
+                    'source_references': source_references,  # For citations
+                    'total_sources_analyzed': len(self.all_results),
+                    'total_high_ranking_sources': len(self.high_ranking_urls),
+                    'research_iterations': self.research_iterations,
+                    'total_queries_used': len(self.previous_queries),
+                    'queries_by_iteration': [
+                        iter_data['queries_used'] 
+                        for iter_data in research_data['iterations']
+                    ]
+                }
+                
+                prompt = f"""Generate a comprehensive research report on: '{main_query}'
+                Using the following information:
+                {json.dumps(report_context, indent=2)}
+                
+                Important Guidelines:
+                - This should be a DETAILED, COMPREHENSIVE report using ALL available information
+                - Use ALL high-ranking sources (score > 0.6) in your analysis
+                - Cross-reference and compare information across multiple sources
+                - Highlight agreements and contradictions between sources
+                - Include direct quotes when they add value, using proper citation numbers
+                - Use citation numbers [X] from source_references for ALL claims
+                - If sources provide different perspectives, analyze all viewpoints
+                - NEVER use triple backticks (```) or code blocks in the report
+                - Format numbers and statistics cleanly (e.g., "$0.14")
+                - Break up long sections into smaller, focused subsections
+                - Use bullet points and lists for better readability
+                
+                Text Formatting Rules:
+                - Use straight quotes (") instead of curly quotes (" ")
+                - Use straight apostrophes (') instead of curly ones (')
+                - Use simple dashes (-) instead of em-dashes (—)
+                - Use standard ellipsis (...) instead of special characters (…)
+                - Avoid ALL special Unicode characters
+                - Write numbers in plain ASCII (1,234.56)
+                
+                Required Report Structure:
+                1. Executive Summary
+                   - Brief overview of findings
+                   - Key conclusions
+                   - Scope of research
+                
+                2. Key Findings
+                   - Major discoveries
+                   - Important statistics
+                   - Critical insights
+                   - Each finding must cite sources
+                
+                3. Detailed Analysis
+                   - Break into relevant subsections
+                   - In-depth examination of all aspects
+                   - Compare and contrast different sources
+                   - Include relevant quotes with citations
+                   - Analyze trends and patterns
+                   - Discuss implications
+                
+                4. Expert Opinions and Market Response
+                   - Expert viewpoints from sources
+                   - Market implications if relevant
+                   - Industry response and reactions
+                   - Future predictions or expectations
+                
+                5. Research Methodology
+                   - Detail the research process
+                   - Queries used in each iteration
+                   - How information was gathered and verified
+                   - Limitations and potential gaps
+                
+                Markdown Formatting Rules:
+                1. Use proper header levels:
+                   ## For main sections (1-5 above)
+                   ### For subsections
+                2. For quotes, use clean single line format with straight quotes:
+                   > "This is a direct quote" [X]
+                3. For lists use:
+                   - Bullet points
+                   1. Numbered points
+                4. For emphasis use:
+                   **bold text**
+                   *italic text*
+                5. Add blank lines between sections for readability
+                
+                Start the report immediately after this prompt without any additional formatting or preamble.
+                Format in clean Markdown without code blocks.
+                
+                DO NOT include a sources section - it will be added automatically."""
+                
+                # Generate streaming response with proper safety settings
+                safety_settings = {
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                }
+                
+                response = self.report_model.generate_content(
+                    prompt,
+                    stream=True,  # Enable streaming
+                    generation_config={
+                        'temperature': 0.7,  # Slightly increase creativity
+                        'top_p': 0.9,  # More diverse output
+                        'max_output_tokens': 8192,  # Increased for longer reports
+                    },
+                    safety_settings=safety_settings
+                )
+                
+                self.logger.info("Starting report generation stream")
+                return response, sources_used
+                
+            except Exception as e:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                if attempt < max_retries - 1:
+                    error_msg = str(e)
+                    self.logger.warning(
+                        f"Report generation attempt {attempt + 1} failed: {error_msg}\n"
+                        f"Retrying in {delay} seconds..."
+                    )
+                    await asyncio.sleep(delay)
+                    
+                    # If it's a specific error that might benefit from a smaller context, try reducing content
+                    if "500" in error_msg:
+                        # Reduce content size for next attempt
+                        for url in high_ranking_sources:
+                            if high_ranking_sources[url].get('content'):
+                                high_ranking_sources[url]['content'] = high_ranking_sources[url]['content'][:3000]
+                        self.logger.info("Reduced content size for next attempt")
+                else:
+                    self.logger.error(f"All report generation attempts failed: {e}")
+                    return None, ""
         
-        # Create numbered references for citations
-        source_references = {
-            url: f"[{i+1}]" 
-            for i, (url, _) in enumerate(sorted_sources)
-        }
-        
-        # Create source list for the report
-        sources_used = "\n\n## Sources Used\n\n"
-        for i, (url, data) in enumerate(sorted_sources, 1):
-            sources_used += f"[{i}] {data['title']}\n"
-            sources_used += f"- URL: {url}\n"
-            sources_used += f"- Relevance Score: {data['score']:.2f}\n"
-            sources_used += f"- Domain: {data['domain']}\n\n"
-        
-        report_context = {
-            'main_query': main_query,
-            'research_data': research_data,
-            'high_ranking_sources': dict(sorted_sources),  # Ordered by score
-            'source_references': source_references,  # For citations
-            'total_sources_analyzed': len(self.all_results),
-            'total_high_ranking_sources': len(self.high_ranking_urls),
-            'research_iterations': self.research_iterations,
-            'total_queries_used': len(self.previous_queries),
-            'queries_by_iteration': [
-                iter_data['queries_used'] 
-                for iter_data in research_data['iterations']
-            ]
-        }
-        
-        prompt = f"""Generate a comprehensive research report on: '{main_query}'
-        Using the following information:
-        {json.dumps(report_context, indent=2)}
-        
-        Important Guidelines:
-        - This should be a DETAILED, COMPREHENSIVE report using ALL available information
-        - Use ALL high-ranking sources (score > 0.6) in your analysis
-        - Cross-reference and compare information across multiple sources
-        - Highlight agreements and contradictions between sources
-        - Include direct quotes when they add value, using proper citation numbers
-        - Use citation numbers [X] from source_references for ALL claims
-        - If sources provide different perspectives, analyze all viewpoints
-        - NEVER use triple backticks (```) or code blocks in the report
-        - Format numbers and statistics cleanly (e.g., "$0.14")
-        - Break up long sections into smaller, focused subsections
-        - Use bullet points and lists for better readability
-        
-        Text Formatting Rules:
-        - Use straight quotes (") instead of curly quotes (" ")
-        - Use straight apostrophes (') instead of curly ones (')
-        - Use simple dashes (-) instead of em-dashes (—)
-        - Use standard ellipsis (...) instead of special characters (…)
-        - Avoid ALL special Unicode characters
-        - Write numbers in plain ASCII (1,234.56)
-        
-        Required Report Structure:
-        1. Executive Summary
-           - Brief overview of findings
-           - Key conclusions
-           - Scope of research
-        
-        2. Key Findings
-           - Major discoveries
-           - Important statistics
-           - Critical insights
-           - Each finding must cite sources
-        
-        3. Detailed Analysis
-           - Break into relevant subsections
-           - In-depth examination of all aspects
-           - Compare and contrast different sources
-           - Include relevant quotes with citations
-           - Analyze trends and patterns
-           - Discuss implications
-        
-        4. Expert Opinions and Market Response
-           - Expert viewpoints from sources
-           - Market implications if relevant
-           - Industry response and reactions
-           - Future predictions or expectations
-        
-        5. Research Methodology
-           - Detail the research process
-           - Queries used in each iteration
-           - How information was gathered and verified
-           - Limitations and potential gaps
-        
-        Markdown Formatting Rules:
-        1. Use proper header levels:
-           ## For main sections (1-5 above)
-           ### For subsections
-        2. For quotes, use clean single line format with straight quotes:
-           > "This is a direct quote" [X]
-        3. For lists use:
-           - Bullet points
-           1. Numbered points
-        4. For emphasis use:
-           **bold text**
-           *italic text*
-        5. Add blank lines between sections for readability
-        
-        Start the report immediately after this prompt without any additional formatting or preamble.
-        Format in clean Markdown without code blocks.
-        
-        DO NOT include a sources section - it will be added automatically."""
-        
-        try:
-            # Generate streaming response with proper safety settings
-            safety_settings = {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-            
-            response = self.report_model.generate_content(
-                prompt,
-                stream=True,  # Enable streaming
-                generation_config={
-                    'temperature': 0.7,  # Slightly increase creativity
-                    'top_p': 0.9,  # More diverse output
-                    'max_output_tokens': 8192,  # Increased for longer reports
-                },
-                safety_settings=safety_settings
-            )
-            
-            self.logger.info("Starting report generation stream")
-            
-            # Return both the response and sources section
-            return response, sources_used
-            
-        except Exception as e:
-            self.logger.error(f"Error generating streaming report: {e}")
-            return None, ""
+        return None, ""
 
     async def research(self, query: str) -> str:
         """Main research function that coordinates the entire research process."""
