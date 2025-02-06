@@ -20,6 +20,7 @@ import aiohttp
 from functools import partial
 import httplib2
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from vertexai.preview import tokenization
 
 class DeepResearchAgent:
     def __init__(self):
@@ -84,6 +85,10 @@ class DeepResearchAgent:
         self.MAX_ITERATIONS = 3
         self.system_context = system_context
         self.total_tokens = 0  # Track total tokens used
+        
+        # Initialize tokenizer for Gemini model
+        self.tokenizer = tokenization.get_tokenizer_for_model('gemini-1.5-flash-001')
+        self.token_usage_by_operation = defaultdict(int)
 
     async def __aenter__(self):
         """Async initialization when entering context."""
@@ -1072,15 +1077,35 @@ class DeepResearchAgent:
             self.logger.error(f"Error saving report: {e}")
 
     def count_tokens(self, text: str) -> int:
-        """Estimate token count for a text string."""
-        # Rough estimation: 4 chars per token on average
-        return len(text) // 4
+        """Count tokens accurately using Vertex AI tokenizer."""
+        if not text:
+            return 0
+        try:
+            # Convert text to string if it's not already
+            text = str(text)
+            # Count tokens using Vertex AI tokenizer
+            result = self.tokenizer.count_tokens(text)
+            return result.total_tokens
+        except Exception as e:
+            self.logger.warning(f"Token counting error: {e}")
+            # Fallback to rough estimation if tokenizer fails
+            return len(text) // 4
 
     def log_token_usage(self, text: str, operation: str):
-        """Log token usage for an operation."""
-        tokens = self.count_tokens(text)
-        self.total_tokens += tokens
-        self.logger.info(f"Token usage for {operation}: {tokens} (Total: {self.total_tokens})")
+        """Log token usage for an operation with improved tracking."""
+        try:
+            tokens = self.count_tokens(text)
+            self.total_tokens += tokens
+            self.token_usage_by_operation[operation] += tokens
+            
+            # Log detailed usage information
+            self.logger.info(
+                f"Token usage for {operation}: {tokens:,} tokens "
+                f"(Operation total: {self.token_usage_by_operation[operation]:,}, "
+                f"Grand total: {self.total_tokens:,})"
+            )
+        except Exception as e:
+            self.logger.error(f"Error logging token usage: {e}")
 
     def reset_state(self):
         """Reset all state tracking for a new query."""
