@@ -53,7 +53,7 @@ class DeepResearchAgent:
         )  # Default model for general tasks
         
         self.ranking_model = genai.GenerativeModel(
-            'gemini-2.0-flash',
+            'gemini-2.0-flash-lite-preview-02-05',
             safety_settings=self.safety_settings
         )  # Specific model for ranking
         
@@ -232,6 +232,43 @@ class DeepResearchAgent:
 
     def generate_subqueries(self, main_query: str, research_state: Optional[Dict] = None) -> List[str]:
         """Generate sub-queries using AI to explore different aspects of the main query."""
+        # First, check if this is a simple query that doesn't need sub-queries
+        simple_query_prompt = f"""{self.system_context}
+        Determine if this query requires additional research queries:
+        Query: '{main_query}'
+        
+        Guidelines for SIMPLE queries (no additional research needed):
+        - Basic arithmetic (e.g., "what is 2+2")
+        - Single fact lookups (e.g., "capital of France")
+        - Simple definitions (e.g., "what is a tree")
+        - Basic conversions (e.g., "10 km to miles")
+        - Yes/no questions with obvious answers
+        
+        Format response EXACTLY as:
+        TYPE: [SIMPLE/COMPLEX]
+        REASON: [One sentence explanation]"""
+        
+        try:
+            response = self.model.generate_content(simple_query_prompt)
+            if response and response.text:
+                response_text = response.text.strip()
+                query_type = None
+                reason = None
+                
+                for line in response_text.split('\n'):
+                    line = line.strip()
+                    if line.startswith('TYPE:'):
+                        query_type = line.split(':', 1)[1].strip().upper()
+                    elif line.startswith('REASON:'):
+                        reason = line.split(':', 1)[1].strip()
+                
+                if query_type == "SIMPLE":
+                    self.logger.info(f"Simple query detected: {reason}")
+                    return [main_query]  # Return only the main query for simple queries
+        except Exception as e:
+            self.logger.warning(f"Error checking query complexity: {e}")
+        
+        # Continue with normal sub-query generation for complex queries
         context = ""
         if research_state and self.previous_queries:
             context = f"""
@@ -280,6 +317,7 @@ class DeepResearchAgent:
                 except Exception as e:
                     self.logger.warning(f"Error processing query line '{line}': {e}")
                     continue
+            subqueries.append(main_query)
             
             # Validate final results
             if not subqueries:
@@ -287,7 +325,6 @@ class DeepResearchAgent:
                 return [main_query]
             
             # Limit to 10 queries and log results
-            subqueries = subqueries[:10]
             self.logger.info(f"Generated {len(subqueries)} queries:")
             for q in subqueries:
                 self.logger.info(f"Query: {q}")
@@ -298,7 +335,7 @@ class DeepResearchAgent:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
 
-    async def batch_web_search(self, queries: List[str], num_results: int = 20) -> List[Dict]:
+    async def batch_web_search(self, queries: List[str], num_results: int = 12) -> List[Dict]:
         """Perform multiple web searches in parallel."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
@@ -399,7 +436,7 @@ class DeepResearchAgent:
                     response = await page.goto(
                         url, 
                         wait_until='domcontentloaded',
-                        timeout=10000
+                        timeout=15000  # Increased timeout
                     )
                     
                     if not response.ok:
@@ -410,44 +447,76 @@ class DeepResearchAgent:
                     self.logger.warning(f"Timeout loading {url}")
                     return ""
                 
-                # Simple content extraction
+                # Enhanced content extraction with better text handling
                 content = await page.evaluate("""
                     () => {
+                        // Helper function to clean text
+                        const cleanText = (text) => {
+                            return text.replace(/\\s+/g, ' ').trim();
+                        };
+                        
+                        // Helper to check if element is visible
+                        const isVisible = (elem) => {
+                            const style = window.getComputedStyle(elem);
+                            return style.display !== 'none' && 
+                                   style.visibility !== 'hidden' && 
+                                   style.opacity !== '0' &&
+                                   elem.offsetWidth > 0 &&
+                                   elem.offsetHeight > 0;
+                        };
+                        
+                        // Get all meaningful content
+                        const contentSections = [];
+                        
                         // Try to get main content first
-                        const article = document.querySelector('article, [role="main"], main, .content, .post');
-                        if (article) {
-                            const text = article.innerText;
-                            if (text.length >= 100) return text;
+                        const mainContent = document.querySelector('article, [role="main"], main, .content, .post');
+                        if (mainContent && isVisible(mainContent)) {
+                            const text = cleanText(mainContent.innerText);
+                            if (text.length >= 100) {
+                                contentSections.push(text);
+                            }
                         }
                         
-                        // If no main content, get all meaningful text
-                        const textContent = [];
-                        const elements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, div > text');
+                        // Get content from all meaningful elements
+                        const elements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, div:not(:empty)');
                         
                         elements.forEach(elem => {
-                            // Skip if element is hidden or part of navigation/footer
-                            const style = window.getComputedStyle(elem);
-                            if (style.display === 'none' || style.visibility === 'hidden') return;
-                            if (elem.closest('nav, footer, header, aside')) return;
+                            // Skip if element is hidden or part of navigation/footer/etc
+                            if (!isVisible(elem) || elem.closest('nav, footer, header, aside, .menu, .navigation')) {
+                                return;
+                            }
                             
-                            const text = elem.innerText.trim();
-                            // Only add if text is meaningful (not just a number or single word)
+                            // Skip elements with too many links (likely navigation)
+                            if (elem.querySelectorAll('a').length > elem.textContent.split(' ').length / 3) {
+                                return;
+                            }
+                            
+                            const text = cleanText(elem.innerText);
+                            // Only add if text is meaningful
                             if (text.length >= 20 || (text.includes(' ') && text.length >= 10)) {
-                                textContent.push(text);
+                                contentSections.push(text);
                             }
                         });
                         
-                        return textContent.join('\\n\\n');
+                        // Join all content with proper spacing
+                        return contentSections.join('\\n\\n');
                     }
                 """)
                 
-                if content and len(content) >= 100:
-                    return content.strip()
+                if content:
+                    # Clean content server-side as well
+                    content = re.sub(r'\s+', ' ', content).strip()
+                    content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
+                    
+                    if len(content) >= 100:  # Only return if we got meaningful content
+                        return content
                 
                 return ""
                 
             except Exception as e:
                 self.logger.warning(f"Extraction error for {url}: {str(e)}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(2)  # Wait before retry
                 return ""
             finally:
                 if page:
@@ -485,22 +554,26 @@ class DeepResearchAgent:
         For each URL, determine:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
-        3. Reason for scraping decision
+        3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
+           - LOW: 3000 chars - For basic/overview content
+           - MEDIUM: 6000 chars - For moderate detail (default)
+           - HIGH: 12000 chars - For in-depth analysis
         
-        Consider these factors for scraping:
-        - Likely contains detailed, relevant information
-        - From authoritative or primary sources
-        - Recent and up-to-date content
+        Consider these factors:
+        - Content depth and relevance to query
+        - Source authority and reliability
+        - Need for detailed information
+        - If the request is simple (e.g. 2+2), mark none for scraping
         
         Format response EXACTLY as follows, one entry per line:
-        [url] | [score] | [YES/NO] | [reason]
+        [url] | [score] | [YES/NO] | [LOW/MEDIUM/HIGH]
         
         IMPORTANT RULES:
         - All scores must be unique (no ties) and between 0 and 1.0
         - Only give 1.0 for perfect matches
         - Mark YES for scraping only if the content is likely highly relevant
-        - Give clear, concise reasons for scraping decisions
-        - You MUST rank ALL URLs provided, not just the top 20
+        - Scraping level should match content importance and depth
+        - You MUST rank ALL URLs provided
         - Provide scraping decisions for ALL URLs
         
         URLs to analyze:
@@ -522,10 +595,10 @@ class DeepResearchAgent:
                 try:
                     # Split line by | and strip whitespace
                     parts = [p.strip() for p in line.split('|')]
-                    if len(parts) != 4:
+                    if len(parts) != 4:  # Updated to expect 4 parts
                         continue
                         
-                    url, score_str, scrape_decision, reason = parts
+                    url, score_str, scrape_decision, scrape_level = parts
                     score = float(score_str)
                     
                     rankings[url] = score
@@ -535,10 +608,15 @@ class DeepResearchAgent:
                     if should_scrape:
                         scrape_count += 1
                     
+                    # Validate and normalize scraping level
+                    scrape_level = scrape_level.upper()
+                    if scrape_level not in ['LOW', 'MEDIUM', 'HIGH']:
+                        scrape_level = 'MEDIUM'  # Default to medium if invalid
+                    
                     scrape_decisions[url] = {
                         'should_scrape': should_scrape,
-                        'reason': reason,
-                        'original_decision': scrape_decision.upper() == 'YES'  # Store original decision for debugging
+                        'scrape_level': scrape_level,
+                        'original_decision': scrape_decision.upper() == 'YES'
                     }
 
                     # Track high-ranking URLs (score > 0.6)
@@ -573,8 +651,7 @@ class DeepResearchAgent:
                 self.logger.info(
                     f"{r['url']} (Score: {r.get('relevance_score', 0):.3f}, "
                     f"Scrape: {decision['should_scrape']} "
-                    f"(Original: {decision['original_decision']}), "
-                    f"Reason: {decision['reason']})"
+                    f"(Original: {decision['original_decision']}, Level: {decision['scrape_level']})"
                 )
             
             # Log summary of scraping decisions
@@ -587,6 +664,15 @@ class DeepResearchAgent:
         except Exception as e:
             self.logger.error(f"Ranking error: {e}")
             return new_results
+
+    def get_scrape_limit(self, scrape_level: str) -> int:
+        """Get character limit based on scraping level."""
+        limits = {
+            'LOW': 3000,
+            'MEDIUM': 6000,
+            'HIGH': 12000
+        }
+        return limits.get(scrape_level.upper(), 6000)  # Default to MEDIUM if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -654,7 +740,7 @@ class DeepResearchAgent:
         Current data: {json.dumps(current_data, indent=2)}
         
         IMPORTANT DECISION GUIDELINES:
-        1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately - no research needed
+        1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately and mark as SIMPLE
         2. For queries that can be fully answered with current findings, say NO
         3. For queries needing more depth/verification, say YES and specify what's missing
         4. Consider the query ANSWERED when you have:
@@ -670,6 +756,7 @@ class DeepResearchAgent:
         
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
+        TYPE: [SIMPLE/COMPLEX]
         REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
@@ -687,6 +774,7 @@ class DeepResearchAgent:
             
             # Parse sections
             decision = False
+            query_type = "COMPLEX"  # Default to complex
             blacklist = []
             missing = []
             search_queries = []
@@ -701,6 +789,9 @@ class DeepResearchAgent:
                 # Handle section headers
                 if line.startswith("DECISION:"):
                     decision = "YES" in line.upper()
+                    current_section = None
+                elif line.startswith("TYPE:"):
+                    query_type = line.split(":", 1)[1].strip().upper()
                     current_section = None
                 elif line.startswith("BLACKLIST:"):
                     current_section = "BLACKLIST"
@@ -723,7 +814,7 @@ class DeepResearchAgent:
                         # Handle multiple query formats
                         if line.startswith('- '):
                             search_queries.append(line[2:].strip())
-                        elif line.strip() and not line.startswith(('DECISION:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:')):
+                        elif line.strip() and not line.startswith(('DECISION:', 'TYPE:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:')):
                             # Handle numbered or plain queries
                             clean_query = line.split('. ', 1)[-1] if '. ' in line else line
                             search_queries.append(clean_query.strip())
@@ -736,10 +827,26 @@ class DeepResearchAgent:
             self.blacklisted_urls.update(blacklist)
             
             # Prepare explanation
+            explanation = f"Query type: {query_type}. " + explanation
             if missing:
                 explanation += "\n\nMissing Information:\n" + "\n".join(f"- {m}" for m in missing)
             if search_queries:
                 explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
+            
+            # For simple queries, ensure we have a report structure
+            if query_type == "SIMPLE" and not report_structure:
+                report_structure = """
+                # Answer to: {query}
+                
+                ## Direct Answer
+                Provide the simple, factual answer to the query.
+                
+                ## Brief Explanation (if needed)
+                Optional brief explanation of the answer, if relevant.
+                
+                ## Additional Context (if applicable)
+                Any relevant context or related information, if appropriate.
+                """.strip()
             
             return decision, explanation, search_queries, report_structure
         except Exception as e:
@@ -760,11 +867,7 @@ class DeepResearchAgent:
             filename = f"reports/{clean_query}-{self.current_date}.md"
             
             # Add metadata to report
-            full_report = f"""# Research Report: {query}
-Date: {self.current_date}
-Location: {self.approximate_location}
-
-{report}"""
+            full_report = f"{report}"
             
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(full_report)
@@ -795,15 +898,26 @@ Location: {self.approximate_location}
         self.total_tokens = 0
         self.logger.info("Reset research state")
 
+    def clean_filename(self, query: str, max_length: int = 100) -> str:
+        """Clean and truncate query for filename creation."""
+        # Remove special characters and convert spaces to hyphens
+        clean_query = re.sub(r'[^\w\s-]', '', query).strip().lower()
+        clean_query = re.sub(r'[-\s]+', '-', clean_query)
+        
+        # Truncate if longer than max_length while keeping whole words
+        if len(clean_query) > max_length:
+            clean_query = clean_query[:max_length].rsplit('-', 1)[0]
+        
+        return clean_query
+
     def save_report_streaming(self, query: str, report_generator, sources_used: str):
         """Save the report to a markdown file in a streaming fashion."""
         try:
             # Create reports directory if it doesn't exist
             os.makedirs('reports', exist_ok=True)
             
-            # Clean query for filename
-            clean_query = re.sub(r'[^\w\s-]', '', query).strip().lower()
-            clean_query = re.sub(r'[-\s]+', '-', clean_query)
+            # Clean and truncate query for filename
+            clean_query = self.clean_filename(query)
             
             # Create filename with date
             filename = f"reports/{clean_query}-{self.current_date}.md"
@@ -922,6 +1036,8 @@ Location: {self.approximate_location}
                 - Use standard ellipsis (...) instead of special characters (…)
                 - Avoid ALL special Unicode characters
                 - Write numbers in plain ASCII (1,234.56)
+                - Always put titles in #, headings in ## and subheadings in ###
+                - Use bold text for emphasis to highlight key points.
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
@@ -1028,41 +1144,65 @@ Location: {self.approximate_location}
                 and r.get('scrape_decision', {}).get('should_scrape', False)
             ][:15]  # Increased from 10 to 15 to get more content
             
+            # Log info about scraping selection but don't break
             if not urls_to_scrape:
-                self.logger.warning("No URLs selected for scraping")
-                break
+                self.logger.info("No new URLs selected for scraping in this iteration")
+            else:
+                self.logger.info(f"Selected {len(urls_to_scrape)} URLs for scraping")
                 
             iteration_data = {
                 'queries_used': search_queries,
                 'findings': []
             }
             
-            # Batch process content extraction for selected URLs
-            contents = await self.batch_extract_content([r['url'] for r in urls_to_scrape])
-            
-            # Update scraped URLs and process content
-            for result in urls_to_scrape:
-                url = result['url']
-                content = contents.get(url, '')
-                if content:
-                    self.scraped_urls.add(url)  # Mark as scraped
-                    
-                    # Apply URL rewrite after content extraction
-                    rewritten_url = self.rewrite_url(url)
-                    
-                    finding = {
-                        'source': rewritten_url,
-                        'content': content[:6000],
-                        'relevance_score': result.get('relevance_score', 0),
-                        'scrape_reason': result.get('scrape_decision', {}).get('reason', '')
-                    }
-                    iteration_data['findings'].append(finding)
-                    research_data['final_sources'].append(finding)
-                    self.log_token_usage(content[:6000], f"Content from {url}")
-                    
-                    # Add to all_results after successful scraping
-                    result['url'] = rewritten_url  # Update URL to rewritten version
-                    self.all_results[rewritten_url] = result
+            if urls_to_scrape:  # Only process URLs if we have any to scrape
+                # Get the top URL that's marked for scraping (will be fully scraped)
+                top_url = urls_to_scrape[0].get('url')
+                self.logger.info(f"Top URL selected for full scraping: {top_url}")
+                
+                # Batch process content extraction for selected URLs
+                contents = await self.batch_extract_content([r['url'] for r in urls_to_scrape])
+                
+                # Update scraped URLs and process content
+                for result in urls_to_scrape:
+                    url = result['url']
+                    content = contents.get(url, '')
+                    if content:
+                        self.scraped_urls.add(url)  # Mark as scraped
+                        
+                        # Apply URL rewrite after content extraction
+                        rewritten_url = self.rewrite_url(url)
+                        
+                        # If this is the top URL, don't truncate the content
+                        if url == top_url:
+                            content_to_store = content  # Store full content
+                            self.logger.info(f"Storing full content ({len(content)} characters) for top URL: {url}")
+                        else:
+                            # Get scraping level from ranking decision
+                            scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                            char_limit = self.get_scrape_limit(scrape_level)
+                            content_to_store = content[:char_limit]
+                            self.logger.info(f"Storing {scrape_level} content ({len(content_to_store)} characters) for URL: {url}")
+                        
+                        finding = {
+                            'source': rewritten_url,
+                            'content': content_to_store,
+                            'relevance_score': result.get('relevance_score', 0),
+                            'is_top_result': url == top_url,  # Mark if this was the top result
+                            'scrape_level': result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')  # Store the scraping level
+                        }
+                        iteration_data['findings'].append(finding)
+                        research_data['final_sources'].append(finding)
+                        
+                        # Log token usage with appropriate message
+                        if url == top_url:
+                            self.log_token_usage(content, f"Full content from top URL: {url}")
+                        else:
+                            self.log_token_usage(content_to_store, f"Content from {url} (Level: {scrape_level})")
+                        
+                        # Add to all_results after successful scraping
+                        result['url'] = rewritten_url  # Update URL to rewritten version
+                        self.all_results[rewritten_url] = result
             
             research_data['iterations'].append(iteration_data)
             
@@ -1098,6 +1238,19 @@ Location: {self.approximate_location}
                 break
         
         if not research_data['final_sources']:
+            # Check if this was a simple query that didn't need scraping
+            if latest_report_structure and "simple" in explanation.lower():
+                self.logger.info("Simple query detected - generating report without sources")
+                report_generator, sources_used = await self.generate_report(query, research_data, latest_report_structure)
+                
+                if report_generator:
+                    # Save the streaming report and return the filename
+                    report_file = self.save_report_streaming(query, report_generator, sources_used)
+                    if report_file:
+                        self.logger.info(f"Report saved to: {report_file}")
+                        return f"Report has been generated and saved to: {report_file}"
+            
+            # If it wasn't a simple query and we have no sources, return error
             return "Error: No valid information could be gathered. Please try again or modify the query."
         
         # Generate and save streaming report using the latest report structure
