@@ -2,7 +2,7 @@ import os
 import json
 from typing import List, Dict, Optional, Set, Tuple
 import google.generativeai as genai
-from googleapiclient.discovery import build
+from test_search import build
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -298,7 +298,7 @@ class DeepResearchAgent:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
 
-    async def batch_web_search(self, queries: List[str], num_results: int = 8) -> List[Dict]:
+    async def batch_web_search(self, queries: List[str], num_results: int = 20) -> List[Dict]:
         """Perform multiple web searches in parallel."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
@@ -500,7 +500,7 @@ class DeepResearchAgent:
         - Only give 1.0 for perfect matches
         - Mark YES for scraping only if the content is likely highly relevant
         - Give clear, concise reasons for scraping decisions
-        - You MUST rank ALL URLs provided, not just the top 10
+        - You MUST rank ALL URLs provided, not just the top 20
         - Provide scraping decisions for ALL URLs
         
         URLs to analyze:
@@ -531,7 +531,7 @@ class DeepResearchAgent:
                     rankings[url] = score
                     
                     # Only mark for scraping if we haven't hit our limit
-                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 10
+                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 20
                     if should_scrape:
                         scrape_count += 1
                     
@@ -911,6 +911,9 @@ Location: {self.approximate_location}
                 
                 Follow this custom report structure and guidelines:
                 {report_structure}
+                Include an "Opinion" section at the end of the report. This should focus on your views on the topic and the sources used to form those views.
+                The report should be long and detailed, and should include all the information from the sources used.
+                Contradictions in sources should be noted and explained, and the report should provide a conclusion that takes into account the contradictions.
                 
                 Text Formatting Rules:
                 - Use straight quotes (") instead of curly quotes (" ")
@@ -1018,12 +1021,12 @@ Location: {self.approximate_location}
             # Rank new results before adding to all_results
             ranked_new_results = self.rank_new_results(query, search_results)
             
-            # Filter URLs based on scraping decisions and get top 10
+            # Filter URLs based on scraping decisions and get top 15
             urls_to_scrape = [
                 r for r in ranked_new_results 
                 if r['url'] not in self.scraped_urls 
                 and r.get('scrape_decision', {}).get('should_scrape', False)
-            ][:10]
+            ][:15]  # Increased from 10 to 15 to get more content
             
             if not urls_to_scrape:
                 self.logger.warning("No URLs selected for scraping")
