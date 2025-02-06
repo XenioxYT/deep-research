@@ -887,14 +887,20 @@ class DeepResearchAgent:
         ANALYSIS STEPS:
         1. First, determine if this is a simple factual query requiring no research
         2. If research is needed, assess if current findings sufficiently answer the query
-        3. Only continue research if genuinely valuable information is missing
-        4. Generate a custom report structure based on the query type and findings
-        5. Mark any unscraped URLs that should be scraped in the next iteration
+        3. Review all scraped URLs and identify any that are:
+           - Not directly relevant to the main query
+           - Contain tangential or off-topic information
+           - Duplicate or redundant information
+           - Low quality or unreliable sources
+        4. Only continue research if genuinely valuable information is missing
+        5. Generate a custom report structure based on the query type and findings
+        6. Mark any unscraped URLs that should be scraped in the next iteration
         
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
         TYPE: [SIMPLE/COMPLEX]
         REASON: [One clear sentence explaining the decision]
+        REMOVE_URLS: [List URLs to remove from context, one per line, with brief reason after # symbol]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
         SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
@@ -918,6 +924,7 @@ class DeepResearchAgent:
             search_queries = []
             report_structure = ""
             urls_to_scrape_next = {}  # New dict to store URLs and their scrape levels
+            urls_to_remove = {}  # New dict to store URLs to remove and their reasons
             current_section = None
             
             for line in response.text.split('\n'):
@@ -932,6 +939,8 @@ class DeepResearchAgent:
                 elif line.startswith("TYPE:"):
                     query_type = line.split(":", 1)[1].strip().upper()
                     current_section = None
+                elif line.startswith("REMOVE_URLS:"):
+                    current_section = "REMOVE_URLS"
                 elif line.startswith("BLACKLIST:"):
                     current_section = "BLACKLIST"
                 elif line.startswith("MISSING:"):
@@ -947,7 +956,13 @@ class DeepResearchAgent:
                     current_section = None
                 else:
                     # Handle section content
-                    if current_section == "BLACKLIST" and line.startswith('http'):
+                    if current_section == "REMOVE_URLS" and line.startswith('http'):
+                        # Parse URL and reason if provided
+                        parts = line.split('#', 1)
+                        url = parts[0].strip()
+                        reason = parts[1].strip() if len(parts) > 1 else "Not relevant to query"
+                        urls_to_remove[url] = reason
+                    elif current_section == "BLACKLIST" and line.startswith('http'):
                         blacklist.append(line.strip())
                     elif current_section == "MISSING" and line.startswith('-'):
                         missing.append(line[1:].strip())
@@ -955,7 +970,7 @@ class DeepResearchAgent:
                         # Handle multiple query formats
                         if line.startswith('- '):
                             search_queries.append(line[2:].strip())
-                        elif line.strip() and not line.startswith(('DECISION:', 'TYPE:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:', 'SCRAPE_NEXT:')):
+                        elif line.strip() and not line.startswith(('DECISION:', 'TYPE:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:', 'SCRAPE_NEXT:', 'REMOVE_URLS:')):
                             # Handle numbered or plain queries
                             clean_query = line.split('. ', 1)[-1] if '. ' in line else line
                             search_queries.append(clean_query.strip())
@@ -970,7 +985,26 @@ class DeepResearchAgent:
                             report_structure += "\n"
                         report_structure += line
             
-            # Update blacklist
+            # Process URLs to remove
+            for url, reason in urls_to_remove.items():
+                # Remove from all_results
+                if url in self.all_results:
+                    del self.all_results[url]
+                    self.logger.info(f"Removed URL from context: {url} (Reason: {reason})")
+                
+                # Remove from high_ranking_urls
+                if url in self.high_ranking_urls:
+                    del self.high_ranking_urls[url]
+                    self.logger.info(f"Removed URL from high-ranking URLs: {url}")
+                
+                # Add to blacklist to prevent re-scraping
+                self.blacklisted_urls.add(url)
+                
+                # Remove from scraped_urls if present
+                if url in self.scraped_urls:
+                    self.scraped_urls.remove(url)
+            
+            # Update blacklist with additional URLs
             self.blacklisted_urls.update(blacklist)
             
             # Update scraping decisions in all_results for next iteration
@@ -985,6 +1019,8 @@ class DeepResearchAgent:
             
             # Prepare explanation
             explanation = f"Query type: {query_type}. " + explanation
+            if urls_to_remove:
+                explanation += "\n\nRemoved URLs:\n" + "\n".join(f"- {url} (Reason: {reason})" for url, reason in urls_to_remove.items())
             if missing:
                 explanation += "\n\nMissing Information:\n" + "\n".join(f"- {m}" for m in missing)
             if search_queries:
