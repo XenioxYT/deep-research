@@ -325,88 +325,93 @@ class DeepResearchAgent:
             return [main_query]
 
     async def batch_web_search(self, queries: List[str], num_results: int = 12) -> List[Dict]:
-        """Perform multiple web searches in parallel."""
+        """Perform multiple web searches in parallel with increased batch size."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
-        def search_single(query: str) -> List[Dict]:
-            """Synchronous search function to run in thread pool."""
-            try:
-                # Add retry logic and better error handling
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        # Add SSL verification settings
-                        http = httplib2.Http(timeout=30)
-                        http.disable_ssl_certificate_validation = True
-                        
-                        results = self.search_engine.list(
-                            q=query,
-                            cx=self.search_engine_id,
-                            num=num_results
-                        ).execute(http=http)
-                        
-                        if not results or 'items' not in results:
-                            self.logger.warning(f"No results found for query: {query}")
-                            return []
-                        
-                        search_results = []
-                        for item in results.get('items', []):
-                            try:
-                                url = item.get('link', '')
-                                if not url or self.should_skip_url(url):
+        # Increased batch size for better throughput
+        batch_size = 10  # Increased from 3
+        max_concurrent = 5  # Maximum concurrent API calls
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def search_with_semaphore(query: str) -> List[Dict]:
+            """Perform a single search with semaphore control."""
+            async with semaphore:
+                try:
+                    # Add retry logic with exponential backoff
+                    max_retries = 3
+                    base_delay = 1
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            # Create SSL-unverified HTTP client
+                            http = httplib2.Http(timeout=30)
+                            http.disable_ssl_certificate_validation = True
+                            
+                            results = await asyncio.to_thread(
+                                self.search_engine.list(
+                                    q=query,
+                                    cx=self.search_engine_id,
+                                    num=num_results
+                                ).execute,
+                                http=http
+                            )
+                            
+                            if not results or 'items' not in results:
+                                self.logger.warning(f"No results found for query: {query}")
+                                return []
+                            
+                            search_results = []
+                            for item in results.get('items', []):
+                                try:
+                                    url = item.get('link', '')
+                                    if not url or self.should_skip_url(url):
+                                        continue
+                                        
+                                    result = {
+                                        'title': item.get('title', ''),
+                                        'url': url,
+                                        'snippet': item.get('snippet', ''),
+                                        'domain': item.get('displayLink', ''),
+                                        'source_queries': [query]
+                                    }
+                                    search_results.append(result)
+                                except Exception as item_error:
+                                    self.logger.warning(f"Error processing search result: {item_error}")
                                     continue
-                                    
-                                result = {
-                                    'title': item.get('title', ''),
-                                    'url': url,  # Remove rewrite, use original URL
-                                    'snippet': item.get('snippet', ''),
-                                    'domain': item.get('displayLink', ''),
-                                    'source_queries': [query]
-                                }
-                                search_results.append(result)
-                            except Exception as item_error:
-                                self.logger.warning(f"Error processing search result: {item_error}")
-                                continue
-                        
-                        return search_results
-                        
-                    except Exception as retry_error:
-                        if attempt == max_retries - 1:
-                            raise
-                        self.logger.warning(f"Search attempt {attempt + 1} failed: {retry_error}")
-                        time.sleep(2)  # Wait before retry
-                        
-            except Exception as e:
-                self.logger.error(f"Search error for query '{query}': {str(e)}")
-                return []
+                            
+                            return search_results
+                            
+                        except Exception as retry_error:
+                            if attempt == max_retries - 1:
+                                raise
+                            delay = base_delay * (2 ** attempt)
+                            self.logger.warning(f"Search attempt {attempt + 1} failed: {retry_error}")
+                            await asyncio.sleep(delay)
+                            
+                except Exception as e:
+                    self.logger.error(f"Search error for query '{query}': {str(e)}")
+                    return []
         
-        # Run searches in thread pool with smaller batch size
-        loop = asyncio.get_running_loop()
-        batch_size = 3  # Process queries in smaller batches
+        # Process queries in parallel batches
         all_results = []
-        
         for i in range(0, len(queries), batch_size):
             batch_queries = queries[i:i + batch_size]
-            with ThreadPoolExecutor(max_workers=batch_size) as executor:
-                search_futures = [
-                    loop.run_in_executor(executor, search_single, query)
-                    for query in batch_queries
-                ]
-                batch_results = await asyncio.gather(*search_futures)
-                
-                # Process batch results
-                for query, query_results in zip(batch_queries, batch_results):
-                    for result in query_results:
-                        url = result['url']
-                        if url in self.all_results:
-                            self.all_results[url]['source_queries'].append(query)
-                        else:
-                            self.all_results[url] = result
-                            all_results.append(result)
-                
-                # Add small delay between batches
-                if i + batch_size < len(queries):
-                    await asyncio.sleep(1)
+            batch_tasks = [search_with_semaphore(query) for query in batch_queries]
+            batch_results = await asyncio.gather(*batch_tasks)
+            
+            # Process batch results
+            for query, query_results in zip(batch_queries, batch_results):
+                for result in query_results:
+                    url = result['url']
+                    if url in self.all_results:
+                        self.all_results[url]['source_queries'].append(query)
+                    else:
+                        self.all_results[url] = result
+                        all_results.append(result)
+            
+            # Small delay between batches to prevent rate limiting
+            if i + batch_size < len(queries):
+                await asyncio.sleep(0.5)
         
         self.logger.info(f"Found {len(all_results)} unique results across all queries")
         return all_results
@@ -516,20 +521,162 @@ class DeepResearchAgent:
         
         return ""
 
-    async def batch_extract_content(self, urls: List[str], max_concurrent: int = 3) -> Dict[str, str]:
-        """Extract content from multiple URLs in parallel with concurrency limit."""
+    async def batch_extract_content(self, urls: List[str], max_concurrent: int = 8) -> Dict[str, str]:
+        """Extract content from multiple URLs in parallel with enhanced concurrency."""
         self.logger.info(f"Batch extracting content from {len(urls)} URLs...")
         
+        # Create semaphore for concurrency control
         semaphore = asyncio.Semaphore(max_concurrent)
         
-        async def extract_with_semaphore(url: str) -> Tuple[str, str]:
+        # Create a pool of browser pages
+        page_pool = []
+        for _ in range(max_concurrent):
+            page = await self.context.new_page()
+            page_pool.append(page)
+        
+        async def extract_with_page_pool(url: str) -> Tuple[str, str]:
+            """Extract content using a page from the pool."""
             async with semaphore:
-                content = await self.extract_content_with_retry(url)
+                page = None
+                try:
+                    # Get a page from the pool
+                    page = page_pool.pop()
+                    
+                    # Enhanced stealth settings per page
+                    await page.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+                    """)
+                    
+                    # Configure page timeouts
+                    page.set_default_navigation_timeout(20000)
+                    page.set_default_timeout(15000)
+                    
+                    # Try to load the page with retry logic
+                    content = ""
+                    max_retries = 1
+                    base_delay = 1
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            # Navigate with enhanced options
+                            response = await page.goto(
+                                url,
+                                wait_until='domcontentloaded',
+                                timeout=15000
+                            )
+                            
+                            if not response or not response.ok:
+                                if attempt < max_retries - 1:
+                                    delay = base_delay * (2 ** attempt)
+                                    await asyncio.sleep(delay)
+                                    continue
+                                return url, ""
+                            
+                            # Wait for content to be available
+                            await page.wait_for_selector('body', timeout=5000)
+                            
+                            # Enhanced content extraction with better text handling
+                            content = await page.evaluate("""
+                                () => {
+                                    // Helper to clean text
+                                    const cleanText = (text) => {
+                                        return text.replace(/\\s+/g, ' ').trim();
+                                    };
+                                    
+                                    // Helper to check visibility
+                                    const isVisible = (elem) => {
+                                        const style = window.getComputedStyle(elem);
+                                        return style.display !== 'none' && 
+                                               style.visibility !== 'hidden' && 
+                                               style.opacity !== '0' &&
+                                               elem.offsetWidth > 0 &&
+                                               elem.offsetHeight > 0;
+                                    };
+                                    
+                                    // Get main content first
+                                    const contentSections = new Set();
+                                    const mainContent = document.querySelector('article, [role="main"], main, .content, .post');
+                                    if (mainContent && isVisible(mainContent)) {
+                                        contentSections.add(cleanText(mainContent.innerText));
+                                    }
+                                    
+                                    // Get content from meaningful elements
+                                    const elements = document.querySelectorAll(
+                                        'p, h1, h2, h3, h4, h5, h6, li, td, th, div:not(:empty)'
+                                    );
+                                    
+                                    elements.forEach(elem => {
+                                        if (!isVisible(elem) || 
+                                            elem.closest('nav, footer, header, aside, .menu, .navigation')) {
+                                            return;
+                                        }
+                                        
+                                        // Skip elements with too many links
+                                        if (elem.querySelectorAll('a').length > 
+                                            elem.textContent.split(' ').length / 3) {
+                                            return;
+                                        }
+                                        
+                                        const text = cleanText(elem.innerText);
+                                        if (text.length >= 20 || (text.includes(' ') && text.length >= 10)) {
+                                            contentSections.add(text);
+                                        }
+                                    });
+                                    
+                                    return Array.from(contentSections).join('\\n\\n');
+                                }
+                            """)
+                            
+                            if content:
+                                # Clean content server-side
+                                content = re.sub(r'\s+', ' ', content).strip()
+                                content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
+                                break
+                                
+                        except PlaywrightTimeout:
+                            if attempt < max_retries - 1:
+                                delay = base_delay * (2 ** attempt)
+                                await asyncio.sleep(delay)
+                                continue
+                            return url, ""
+                            
+                        except Exception as e:
+                            self.logger.warning(f"Extraction error for {url} (attempt {attempt + 1}): {str(e)}")
+                            if attempt < max_retries - 1:
+                                delay = base_delay * (2 ** attempt)
+                                await asyncio.sleep(delay)
+                                continue
+                            return url, ""
+                            
+                finally:
+                    if page:
+                        # Return page to pool
+                        page_pool.append(page)
+                
                 return url, content
         
-        tasks = [extract_with_semaphore(url) for url in urls]
-        results = await asyncio.gather(*tasks)
-        return dict(results)
+        try:
+            # Process URLs in parallel
+            tasks = [extract_with_page_pool(url) for url in urls]
+            results = await asyncio.gather(*tasks)
+            
+            # Clean up page pool
+            for page in page_pool:
+                await page.close()
+            
+            return dict(results)
+            
+        except Exception as e:
+            self.logger.error(f"Batch extraction error: {e}")
+            # Clean up page pool on error
+            for page in page_pool:
+                try:
+                    await page.close()
+                except:
+                    pass
+            return {}
 
     def rank_new_results(self, main_query: str, new_results: List[Dict]) -> List[Dict]:
         """Rank only new search results based on relevance using AI."""
@@ -657,11 +804,11 @@ class DeepResearchAgent:
     def get_scrape_limit(self, scrape_level: str) -> int:
         """Get character limit based on scraping level."""
         limits = {
-            'LOW': 3000,
-            'MEDIUM': 6000,
-            'HIGH': 12000
+            'LOW': 1500,
+            'MEDIUM': 3000,
+            'HIGH': 8000
         }
-        return limits.get(scrape_level.upper(), 6000)  # Default to MEDIUM if invalid
+        return limits.get(scrape_level.upper(), 3000)  # Default to MEDIUM if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -750,7 +897,7 @@ class DeepResearchAgent:
         REASON: [One clear sentence explaining the decision]
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
-        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes. Queries should be open ended, so they are not too specific.]
+        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
         SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
         REPORT_STRUCTURE: [A complete, customized report structure and guidelines based on the query type and findings. This should include:
         1. Required sections and their order
@@ -1102,7 +1249,7 @@ Location: {self.approximate_location}
         return None, ""
 
     async def research(self, query: str) -> str:
-        """Main research function that coordinates the entire research process."""
+        """Main research function that coordinates the entire research process with enhanced parallelization."""
         # Reset state for new query
         self.reset_state()
         
@@ -1124,125 +1271,145 @@ Location: {self.approximate_location}
             if self.research_iterations == 0:
                 # First iteration: generate initial queries
                 search_queries = self.generate_subqueries(query, research_data)
-                self.previous_queries.update(search_queries)  # Add to previous queries after generation
+                self.previous_queries.update(search_queries)
             else:
-                # Use the search queries from the previous analysis
-                if not new_queries:  # new_queries comes from previous iteration's analysis
+                if not new_queries:
                     self.logger.warning("No additional search queries provided")
                     break
-                # Filter out previously used queries
                 search_queries = [q for q in new_queries if q not in self.previous_queries]
                 if not search_queries:
                     self.logger.warning("No new unique queries to process")
                     break
-                # Update previous queries with the new ones
                 self.previous_queries.update(search_queries)
             
             self.logger.info(f"Processing {len(search_queries)} queries for iteration {self.research_iterations + 1}")
             
-            # Batch process all searches
-            search_results = await self.batch_web_search(search_queries)
-            if not search_results:
-                self.logger.warning("No search results found")
+            # Parallel processing of search and content extraction
+            async def process_search_batch():
+                # Perform searches in parallel
+                search_results = await self.batch_web_search(search_queries)
+                if not search_results:
+                    return None, []
+                
+                # Rank results in parallel
+                ranked_results = self.rank_new_results(query, search_results)
+                
+                # Remove duplicates with parallel processing
+                seen_urls = set()
+                unique_ranked_results = []
+                
+                async def process_result(result):
+                    url = result['url']
+                    rewritten_url = self.rewrite_url(url)
+                    if rewritten_url not in seen_urls:
+                        seen_urls.add(rewritten_url)
+                        result['url'] = rewritten_url
+                        return result
+                    return None
+                
+                # Process results in parallel
+                tasks = [process_result(result) for result in ranked_results]
+                processed_results = await asyncio.gather(*tasks)
+                unique_ranked_results = [r for r in processed_results if r is not None]
+                
+                return unique_ranked_results, seen_urls
+            
+            # Execute search batch processing
+            unique_ranked_results, seen_urls = await process_search_batch()
+            if not unique_ranked_results:
+                self.logger.warning("No valid results found in this iteration")
                 break
             
-            # Rank new results before adding to all_results
-            ranked_new_results = self.rank_new_results(query, search_results)
-            
-            # Remove duplicates from ranked_new_results
-            seen_urls = set()
-            unique_ranked_results = []
-            for result in ranked_new_results:
-                url = result['url']
-                rewritten_url = self.rewrite_url(url)
-                if rewritten_url not in seen_urls:
-                    seen_urls.add(rewritten_url)
-                    result['url'] = rewritten_url  # Update URL to rewritten version
-                    unique_ranked_results.append(result)
-                else:
-                    self.logger.debug(f"Skipping duplicate URL: {url} (rewritten: {rewritten_url})")
-            
-            # Get URLs marked for scraping from previous iterations and new results
-            # Use a dictionary to keep track of unique URLs and their highest relevance score
+            # Prepare URLs for scraping with parallel processing
             url_to_result = {}
-            for result in list(self.all_results.values()) + unique_ranked_results:
+            
+            async def process_scraping_candidate(result):
                 url = result['url']
-                if url not in self.scraped_urls and result.get('scrape_decision', {}).get('should_scrape', False):
+                if (url not in self.scraped_urls and 
+                    result.get('scrape_decision', {}).get('should_scrape', False)):
+                    return url, result
+                return None
+            
+            # Process scraping candidates in parallel
+            tasks = [
+                process_scraping_candidate(result) 
+                for result in list(self.all_results.values()) + unique_ranked_results
+            ]
+            scraping_candidates = await asyncio.gather(*tasks)
+            
+            # Fix the dictionary comprehension to properly handle the tuple results
+            url_to_result = {}
+            for item in scraping_candidates:
+                if item:  # If we got a valid result
+                    url, result = item  # Unpack the tuple
                     if url not in url_to_result or result.get('relevance_score', 0) > url_to_result[url].get('relevance_score', 0):
                         url_to_result[url] = result
             
-            # Convert back to list and sort by relevance score
+            # Convert to list and sort by relevance score
             urls_to_scrape = sorted(
                 url_to_result.values(),
                 key=lambda x: x.get('relevance_score', 0),
                 reverse=True
             )[:15]  # Take top 15
             
-            # Log info about scraping selection
-            if not urls_to_scrape:
-                self.logger.info("No URLs selected for scraping in this iteration")
-            else:
-                self.logger.info(f"Selected {len(urls_to_scrape)} unique URLs for scraping")
-                for url_data in urls_to_scrape:
-                    scrape_level = url_data.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
-                    self.logger.info(f"URL: {url_data['url']} (Level: {scrape_level}, Score: {url_data.get('relevance_score', 0):.2f})")
-            
             iteration_data = {
                 'queries_used': search_queries,
                 'findings': []
             }
             
-            if urls_to_scrape:  # Only process URLs if we have any to scrape
-                # Get the top URL that's marked for scraping (will be fully scraped)
+            if urls_to_scrape:
+                # Get the top URL for full scraping
                 top_url = urls_to_scrape[0].get('url')
                 self.logger.info(f"Top URL selected for full scraping: {top_url}")
                 
-                # Create a set of URLs to scrape to ensure uniqueness
+                # Create a set of unique URLs to scrape
                 urls_to_extract = {r['url'] for r in urls_to_scrape}
                 
-                # Batch process content extraction for selected URLs
+                # Parallel content extraction
                 contents = await self.batch_extract_content(list(urls_to_extract))
                 
-                # Update scraped URLs and process content
-                for result in urls_to_scrape:
+                # Process extracted content in parallel
+                async def process_content(result):
                     url = result['url']
                     content = contents.get(url, '')
-                    if content:
-                        self.scraped_urls.add(url)  # Mark as scraped
+                    if not content:
+                        return None
                         
-                        # Apply URL rewrite after content extraction
-                        rewritten_url = self.rewrite_url(url)
-                        
-                        # If this is the top URL, don't truncate the content
-                        if url == top_url:
-                            content_to_store = content  # Store full content
-                            self.logger.info(f"Storing full content ({len(content)} characters) for top URL: {url}")
-                        else:
-                            # Get scraping level from ranking decision
-                            scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
-                            char_limit = self.get_scrape_limit(scrape_level)
-                            content_to_store = content[:char_limit]
-                            self.logger.info(f"Storing {scrape_level} content ({len(content_to_store)} characters) for URL: {url}")
-                        
-                        finding = {
-                            'source': rewritten_url,
-                            'content': content_to_store,
-                            'relevance_score': result.get('relevance_score', 0),
-                            'is_top_result': url == top_url,  # Mark if this was the top result
-                            'scrape_level': result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')  # Store the scraping level
-                        }
-                        iteration_data['findings'].append(finding)
-                        research_data['final_sources'].append(finding)
-                        
-                        # Log token usage with appropriate message
-                        if url == top_url:
-                            self.log_token_usage(content, f"Full content from top URL: {url}")
-                        else:
-                            self.log_token_usage(content_to_store, f"Content from {url} (Level: {scrape_level})")
-                        
-                        # Add to all_results after successful scraping
-                        result['url'] = rewritten_url  # Update URL to rewritten version
-                        self.all_results[rewritten_url] = result
+                    self.scraped_urls.add(url)
+                    rewritten_url = self.rewrite_url(url)
+                    
+                    # Determine content length based on URL priority
+                    if url == top_url:
+                        content_to_store = content
+                        self.logger.info(f"Storing full content ({len(content)} chars) for top URL: {url}")
+                    else:
+                        scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                        char_limit = self.get_scrape_limit(scrape_level)
+                        content_to_store = content[:char_limit]
+                        self.logger.info(f"Storing {scrape_level} content ({len(content_to_store)} chars) for URL: {url}")
+                    
+                    finding = {
+                        'source': rewritten_url,
+                        'content': content_to_store,
+                        'relevance_score': result.get('relevance_score', 0),
+                        'is_top_result': url == top_url,
+                        'scrape_level': result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                    }
+                    
+                    # Update all_results
+                    result['url'] = rewritten_url
+                    self.all_results[rewritten_url] = result
+                    
+                    return finding
+                
+                # Process content in parallel
+                content_tasks = [process_content(result) for result in urls_to_scrape]
+                findings = await asyncio.gather(*content_tasks)
+                
+                # Filter out None values and add to iteration data
+                valid_findings = [f for f in findings if f is not None]
+                iteration_data['findings'].extend(valid_findings)
+                research_data['final_sources'].extend(valid_findings)
             
             research_data['iterations'].append(iteration_data)
             
@@ -1262,11 +1429,12 @@ Location: {self.approximate_location}
                 ]
             }
             
-            # Analyze if more research is needed - store results for next iteration
-            need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(query, analysis_context)
+            # Analyze research state
+            need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(
+                query, analysis_context
+            )
             self.log_token_usage(explanation, "Research state analysis")
             
-            # Always update the latest report structure
             if report_structure:
                 latest_report_structure = report_structure
                 self.logger.info("Updated report structure based on latest analysis")
@@ -1283,28 +1451,32 @@ Location: {self.approximate_location}
                 break
         
         if not research_data['final_sources']:
-            # Check if this was a simple query that didn't need scraping
             if latest_report_structure and "simple" in explanation.lower():
                 self.logger.info("Simple query detected - generating report without sources")
-                report_generator, sources_used = await self.generate_report(query, research_data, latest_report_structure)
+                report_generator, sources_used = await self.generate_report(
+                    query, research_data, latest_report_structure
+                )
                 
                 if report_generator:
-                    # Save the streaming report and return the filename
-                    report_file = self.save_report_streaming(query, report_generator, sources_used)
+                    report_file = self.save_report_streaming(
+                        query, report_generator, sources_used
+                    )
                     if report_file:
                         self.logger.info(f"Report saved to: {report_file}")
                         return f"Report has been generated and saved to: {report_file}"
             
-            # If it wasn't a simple query and we have no sources, return error
             return "Error: No valid information could be gathered. Please try again or modify the query."
         
-        # Generate and save streaming report using the latest report structure
+        # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
-        report_generator, sources_used = await self.generate_report(query, research_data, latest_report_structure)
+        report_generator, sources_used = await self.generate_report(
+            query, research_data, latest_report_structure
+        )
         
         if report_generator:
-            # Save the streaming report and return the filename
-            report_file = self.save_report_streaming(query, report_generator, sources_used)
+            report_file = self.save_report_streaming(
+                query, report_generator, sources_used
+            )
             if report_file:
                 self.logger.info(f"Report saved to: {report_file}")
                 return f"Report has been generated and saved to: {report_file}"
