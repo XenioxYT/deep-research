@@ -87,8 +87,10 @@ class DeepResearchAgent:
         self.total_tokens = 0  # Track total tokens used
         
         # Initialize tokenizer for Gemini model
-        self.tokenizer = tokenization.get_tokenizer_for_model('gemini-1.5-flash-001')
+        self.model_name = "gemini-1.5-flash-002"
+        self.tokenizer = tokenization.get_tokenizer_for_model(self.model_name)
         self.token_usage_by_operation = defaultdict(int)
+        self.content_tokens = 0  # Track tokens from stored content separately
 
     async def __aenter__(self):
         """Async initialization when entering context."""
@@ -1077,18 +1079,17 @@ class DeepResearchAgent:
             self.logger.error(f"Error saving report: {e}")
 
     def count_tokens(self, text: str) -> int:
-        """Count tokens accurately using Vertex AI tokenizer."""
+        """Count tokens accurately using Gemini's token counter."""
         if not text:
             return 0
         try:
             # Convert text to string if it's not already
             text = str(text)
-            # Count tokens using Vertex AI tokenizer
-            result = self.tokenizer.count_tokens(text)
-            return result.total_tokens
+            # Count tokens using Gemini's counter
+            return self.model.count_tokens(text).total_tokens
         except Exception as e:
             self.logger.warning(f"Token counting error: {e}")
-            # Fallback to rough estimation if tokenizer fails
+            # Fallback to rough estimation if counter fails
             return len(text) // 4
 
     def log_token_usage(self, text: str, operation: str):
@@ -1098,11 +1099,12 @@ class DeepResearchAgent:
             self.total_tokens += tokens
             self.token_usage_by_operation[operation] += tokens
             
-            # Log detailed usage information
+            # Log detailed usage including content tokens
             self.logger.info(
-                f"Token usage for {operation}: {tokens:,} tokens "
-                f"(Operation total: {self.token_usage_by_operation[operation]:,}, "
-                f"Grand total: {self.total_tokens:,})"
+                f"Token usage for {operation}: {tokens:,} tokens\n"
+                f"Operation total: {self.token_usage_by_operation[operation]:,}\n"
+                f"Content tokens: {self.content_tokens:,}\n"
+                f"Grand total (including content): {self.total_tokens + self.content_tokens:,}"
             )
         except Exception as e:
             self.logger.error(f"Error logging token usage: {e}")
@@ -1116,7 +1118,9 @@ class DeepResearchAgent:
         self.scraped_urls = set()
         self.research_iterations = 0
         self.total_tokens = 0
-        self.logger.info("Reset research state")
+        self.content_tokens = 0
+        self.token_usage_by_operation.clear()
+        self.logger.info("Reset research state and token counter")
 
     def clean_filename(self, query: str, max_length: int = 100) -> str:
         """Clean and truncate query for filename creation."""
@@ -1543,6 +1547,18 @@ Location: {self.approximate_location}
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
+
+    def store_content(self, url: str, content: str, content_type: str = "FULL"):
+        """Store content with token counting."""
+        try:
+            # Count tokens before truncation
+            tokens = self.count_tokens(content)
+            self.content_tokens += tokens
+            self.logger.info(f"Content tokens for {url}: {tokens:,} (Total content tokens: {self.content_tokens:,})")
+            
+            # ... existing storage logic ...
+        except Exception as e:
+            self.logger.error(f"Error storing content: {e}")
 
 def main():
     """Run the research agent with proper async handling."""
