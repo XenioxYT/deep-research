@@ -58,7 +58,7 @@ class DeepResearchAgent:
         )  # Specific model for ranking
         
         self.analysis_model = genai.GenerativeModel(
-            'gemini-2.0-flash-thinking-exp-01-21',
+            'gemini-2.0-flash-lite-preview-02-05',
             safety_settings=self.safety_settings
         )  # Model for analysis
         
@@ -232,43 +232,6 @@ class DeepResearchAgent:
 
     def generate_subqueries(self, main_query: str, research_state: Optional[Dict] = None) -> List[str]:
         """Generate sub-queries using AI to explore different aspects of the main query."""
-        # First, check if this is a simple query that doesn't need sub-queries
-        simple_query_prompt = f"""{self.system_context}
-        Determine if this query requires additional research queries:
-        Query: '{main_query}'
-        
-        Guidelines for SIMPLE queries (no additional research needed):
-        - Basic arithmetic (e.g., "what is 2+2")
-        - Single fact lookups (e.g., "capital of France")
-        - Simple definitions (e.g., "what is a tree")
-        - Basic conversions (e.g., "10 km to miles")
-        - Yes/no questions with obvious answers
-        
-        Format response EXACTLY as:
-        TYPE: [SIMPLE/COMPLEX]
-        REASON: [One sentence explanation]"""
-        
-        try:
-            response = self.model.generate_content(simple_query_prompt)
-            if response and response.text:
-                response_text = response.text.strip()
-                query_type = None
-                reason = None
-                
-                for line in response_text.split('\n'):
-                    line = line.strip()
-                    if line.startswith('TYPE:'):
-                        query_type = line.split(':', 1)[1].strip().upper()
-                    elif line.startswith('REASON:'):
-                        reason = line.split(':', 1)[1].strip()
-                
-                if query_type == "SIMPLE":
-                    self.logger.info(f"Simple query detected: {reason}")
-                    return [main_query]  # Return only the main query for simple queries
-        except Exception as e:
-            self.logger.warning(f"Error checking query complexity: {e}")
-        
-        # Continue with normal sub-query generation for complex queries
         context = ""
         if research_state and self.previous_queries:
             context = f"""
@@ -277,59 +240,85 @@ class DeepResearchAgent:
             Based on the above context and gaps in current research, """
         
         prompt = f"""{self.system_context}
-        {context}Given the main query: '{main_query}', generate 5-10 short, focused search queries 
-        that would be effective for Google search.
-        
-        Guidelines:
+        {context}Analyze this query and generate appropriate search queries.
+
+        Query: '{main_query}'
+
+        First, determine if this is a SIMPLE query that needs no additional research:
+        - Basic arithmetic (e.g., "what is 2+2")
+        - Single fact lookups (e.g., "capital of France")
+        - Simple definitions (e.g., "what is a tree")
+        - Basic conversions (e.g., "10 km to miles")
+        - Yes/no questions with obvious answers
+
+        Format your response EXACTLY as follows:
+        TYPE: [SIMPLE/COMPLEX]
+        REASON: [One sentence explanation]
+        QUERIES:
+        [If SIMPLE: Only list the original query
+        If COMPLEX: Generate 5-10 focused search queries, one per line, starting with numbers
         - Keep queries generic for current/latest things
         - Keep each query under 5-6 words
-        - Keep queries open ended, so they are not too specific.
-        
-        Format: One query per line, starting with a number."""
-        
-        self.logger.info("Generating search queries...")
+        - Keep queries open ended, not too specific]"""
+
+        self.logger.info("Analyzing query and generating search queries...")
         
         try:
             response = self.model.generate_content(prompt)
             if not response or not response.text:
                 self.logger.error("Empty response from AI model")
                 return [main_query]
-                
+            
             self.logger.debug(f"AI Response:\n{response.text}")
             
-            # Clean and validate each query
+            # Parse response
+            response_text = response.text.strip()
+            query_type = None
+            reason = None
+            queries_section_started = False
             subqueries = []
-            for line in response.text.split('\n'):
+            
+            for line in response_text.split('\n'):
                 line = line.strip()
+                if not line:
+                    continue
                 
-                # Skip empty lines or lines without numbers
-                if not line or not any(c.isdigit() for c in line):
-                    continue
+                if line.startswith('TYPE:'):
+                    query_type = line.split(':', 1)[1].strip().upper()
+                elif line.startswith('REASON:'):
+                    reason = line.split(':', 1)[1].strip()
+                elif line.startswith('QUERIES:'):
+                    queries_section_started = True
+                elif queries_section_started:
+                    # For SIMPLE queries, just add the main query
+                    if query_type == "SIMPLE":
+                        subqueries = [main_query]
+                        break
                     
-                # Extract query after the number
-                try:
-                    # Handle different number formats (1., 1-, 1), etc.
-                    query = re.split(r'^\d+[.)-]\s*', line)[-1].strip()
-                    
-                    # Validate query
-                    if query and len(query.split()) <= 6 and len(query) >= 3:
-                        subqueries.append(query)
-                except Exception as e:
-                    self.logger.warning(f"Error processing query line '{line}': {e}")
-                    continue
-            subqueries.append(main_query)
+                    # For COMPLEX queries, process numbered lines
+                    if any(c.isdigit() for c in line):
+                        try:
+                            # Handle different number formats (1., 1-, 1), etc.
+                            query = re.split(r'^\d+[.)-]\s*', line)[-1].strip()
+                            
+                            # Validate query
+                            if query and len(query.split()) <= 6 and len(query) >= 3:
+                                subqueries.append(query)
+                        except Exception as e:
+                            self.logger.warning(f"Error processing query line '{line}': {e}")
+                            continue
             
-            # Validate final results
-            if not subqueries:
-                self.logger.warning("No valid queries generated, using main query")
-                return [main_query]
+            # Always include the main query for complex queries
+            if query_type == "COMPLEX" and main_query not in subqueries:
+                subqueries.append(main_query)
             
-            # Limit to 10 queries and log results
+            # Log results
+            self.logger.info(f"Query type: {query_type} - {reason}")
             self.logger.info(f"Generated {len(subqueries)} queries:")
             for q in subqueries:
                 self.logger.info(f"Query: {q}")
             
-            return subqueries
+            return subqueries if subqueries else [main_query]
             
         except Exception as e:
             self.logger.error(f"Error generating queries: {e}")
@@ -753,6 +742,7 @@ class DeepResearchAgent:
         2. If research is needed, assess if current findings sufficiently answer the query
         3. Only continue research if genuinely valuable information is missing
         4. Generate a custom report structure based on the query type and findings
+        5. Mark any unscraped URLs that should be scraped in the next iteration
         
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
@@ -761,6 +751,7 @@ class DeepResearchAgent:
         BLACKLIST: [List URLs to blacklist, one per line]
         MISSING: [List missing information aspects, one per line]
         SEARCH_QUERIES: [List complete search queries, one per line, max 10. Do not use search formatting or quotes. Queries should be open ended, so they are not too specific.]
+        SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
         REPORT_STRUCTURE: [A complete, customized report structure and guidelines based on the query type and findings. This should include:
         1. Required sections and their order
         2. What to include in each section
@@ -779,6 +770,7 @@ class DeepResearchAgent:
             missing = []
             search_queries = []
             report_structure = ""
+            urls_to_scrape_next = {}  # New dict to store URLs and their scrape levels
             current_section = None
             
             for line in response.text.split('\n'):
@@ -799,6 +791,8 @@ class DeepResearchAgent:
                     current_section = "MISSING"
                 elif line.startswith("SEARCH_QUERIES:"):
                     current_section = "SEARCH_QUERIES"
+                elif line.startswith("SCRAPE_NEXT:"):
+                    current_section = "SCRAPE_NEXT"
                 elif line.startswith("REPORT_STRUCTURE:"):
                     current_section = "REPORT_STRUCTURE"
                 elif line.startswith("REASON:"):  # Add reason to explanation
@@ -814,10 +808,16 @@ class DeepResearchAgent:
                         # Handle multiple query formats
                         if line.startswith('- '):
                             search_queries.append(line[2:].strip())
-                        elif line.strip() and not line.startswith(('DECISION:', 'TYPE:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:')):
+                        elif line.strip() and not line.startswith(('DECISION:', 'TYPE:', 'BLACKLIST:', 'MISSING:', 'SEARCH_QUERIES:', 'REASON:', 'REPORT_STRUCTURE:', 'SCRAPE_NEXT:')):
                             # Handle numbered or plain queries
                             clean_query = line.split('. ', 1)[-1] if '. ' in line else line
                             search_queries.append(clean_query.strip())
+                    elif current_section == "SCRAPE_NEXT":
+                        # Parse URLs marked for scraping in next iteration
+                        if '|' in line:
+                            url, level = [part.strip() for part in line.split('|')]
+                            if level.upper() in ['LOW', 'MEDIUM', 'HIGH']:
+                                urls_to_scrape_next[url] = level.upper()
                     elif current_section == "REPORT_STRUCTURE":
                         if report_structure:
                             report_structure += "\n"
@@ -826,12 +826,24 @@ class DeepResearchAgent:
             # Update blacklist
             self.blacklisted_urls.update(blacklist)
             
+            # Update scraping decisions in all_results for next iteration
+            for url, level in urls_to_scrape_next.items():
+                if url in self.all_results and url not in self.scraped_urls:
+                    self.all_results[url]['scrape_decision'] = {
+                        'should_scrape': True,
+                        'scrape_level': level,
+                        'original_decision': True
+                    }
+                    self.logger.info(f"Marked {url} for {level} scraping in next iteration")
+            
             # Prepare explanation
             explanation = f"Query type: {query_type}. " + explanation
             if missing:
                 explanation += "\n\nMissing Information:\n" + "\n".join(f"- {m}" for m in missing)
             if search_queries:
                 explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
+            if urls_to_scrape_next:
+                explanation += "\n\nURLs Marked for Next Scraping:\n" + "\n".join(f"- {url} ({level})" for url, level in urls_to_scrape_next.items())
             
             # For simple queries, ensure we have a report structure
             if query_type == "SIMPLE" and not report_structure:
@@ -1137,19 +1149,44 @@ Location: {self.approximate_location}
             # Rank new results before adding to all_results
             ranked_new_results = self.rank_new_results(query, search_results)
             
-            # Filter URLs based on scraping decisions and get top 15
-            urls_to_scrape = [
-                r for r in ranked_new_results 
-                if r['url'] not in self.scraped_urls 
-                and r.get('scrape_decision', {}).get('should_scrape', False)
-            ][:15]  # Increased from 10 to 15 to get more content
+            # Remove duplicates from ranked_new_results
+            seen_urls = set()
+            unique_ranked_results = []
+            for result in ranked_new_results:
+                url = result['url']
+                rewritten_url = self.rewrite_url(url)
+                if rewritten_url not in seen_urls:
+                    seen_urls.add(rewritten_url)
+                    result['url'] = rewritten_url  # Update URL to rewritten version
+                    unique_ranked_results.append(result)
+                else:
+                    self.logger.debug(f"Skipping duplicate URL: {url} (rewritten: {rewritten_url})")
             
-            # Log info about scraping selection but don't break
+            # Get URLs marked for scraping from previous iterations and new results
+            # Use a dictionary to keep track of unique URLs and their highest relevance score
+            url_to_result = {}
+            for result in list(self.all_results.values()) + unique_ranked_results:
+                url = result['url']
+                if url not in self.scraped_urls and result.get('scrape_decision', {}).get('should_scrape', False):
+                    if url not in url_to_result or result.get('relevance_score', 0) > url_to_result[url].get('relevance_score', 0):
+                        url_to_result[url] = result
+            
+            # Convert back to list and sort by relevance score
+            urls_to_scrape = sorted(
+                url_to_result.values(),
+                key=lambda x: x.get('relevance_score', 0),
+                reverse=True
+            )[:15]  # Take top 15
+            
+            # Log info about scraping selection
             if not urls_to_scrape:
-                self.logger.info("No new URLs selected for scraping in this iteration")
+                self.logger.info("No URLs selected for scraping in this iteration")
             else:
-                self.logger.info(f"Selected {len(urls_to_scrape)} URLs for scraping")
-                
+                self.logger.info(f"Selected {len(urls_to_scrape)} unique URLs for scraping")
+                for url_data in urls_to_scrape:
+                    scrape_level = url_data.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                    self.logger.info(f"URL: {url_data['url']} (Level: {scrape_level}, Score: {url_data.get('relevance_score', 0):.2f})")
+            
             iteration_data = {
                 'queries_used': search_queries,
                 'findings': []
@@ -1160,8 +1197,11 @@ Location: {self.approximate_location}
                 top_url = urls_to_scrape[0].get('url')
                 self.logger.info(f"Top URL selected for full scraping: {top_url}")
                 
+                # Create a set of URLs to scrape to ensure uniqueness
+                urls_to_extract = {r['url'] for r in urls_to_scrape}
+                
                 # Batch process content extraction for selected URLs
-                contents = await self.batch_extract_content([r['url'] for r in urls_to_scrape])
+                contents = await self.batch_extract_content(list(urls_to_extract))
                 
                 # Update scraped URLs and process content
                 for result in urls_to_scrape:
@@ -1214,7 +1254,12 @@ Location: {self.approximate_location}
                 'high_ranking_urls': self.high_ranking_urls,
                 'current_findings': iteration_data['findings'],
                 'all_iterations': research_data['iterations'],
-                'total_sources': len(research_data['final_sources'])
+                'total_sources': len(research_data['final_sources']),
+                'unscraped_urls': [
+                    {'url': url, 'score': data.get('relevance_score', 0)}
+                    for url, data in self.all_results.items()
+                    if url not in self.scraped_urls
+                ]
             }
             
             # Analyze if more research is needed - store results for next iteration

@@ -27,7 +27,7 @@ class MockSearchEngine:
         """Mimic CSE list method"""
         try:
             # Get raw results and handle empty case
-            raw_results = list(search(q, advanced=True, num_results=num))
+            raw_results = list(search(q, advanced=True, num_results=num, safe="none"))
             if not raw_results:
                 return MockSearchResponse([])
             
