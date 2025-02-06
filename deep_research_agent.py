@@ -64,7 +64,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-pro-exp-02-05',
+            'gemini-2.0-flash-exp',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
@@ -1160,11 +1160,10 @@ Location: {self.approximate_location}
                 try:
                     for chunk in report_generator:
                         if chunk and chunk.text:  # Check both chunk and text exist
-                            clean_text = chunk.text.encode('ascii', 'ignore').decode()  # Remove non-ASCII chars
-                            f.write(clean_text)
+                            f.write(chunk.text)  # Remove ASCII encoding restriction
                             f.flush()  # Ensure content is written immediately
                             # Log progress
-                            self.log_token_usage(clean_text, "Report streaming chunk")
+                            self.log_token_usage(chunk.text, "Report streaming chunk")
                 except Exception as e:
                     self.logger.error(f"Error during streaming: {e}")
                 
@@ -1253,62 +1252,86 @@ Location: {self.approximate_location}
                 The report should be long and detailed, and should include all the information from the sources used.
                 Contradictions in sources should be noted and explained, and the report should provide a conclusion that takes into account the contradictions.
                 
-                Text Formatting Rules:
-                - Use straight quotes (") instead of curly quotes (" ")
-                - Use straight apostrophes (') instead of curly ones (')
-                - Use simple dashes (-) instead of em-dashes (—)
-                - Use standard ellipsis (...) instead of special characters (…)
-                - Avoid ALL special Unicode characters
-                - Write numbers in plain ASCII (1,234.56)
-                - Always put titles in #, headings in ## and subheadings in ###
-                - Use bold text for emphasis to highlight key points.
+                Markdown Formatting Guidelines:
+                - Use section headers with #, ##, and ###
+                - Use **bold** for emphasis on key points
+                - Format numbers naturally with proper thousands separators
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
                 
                 DO NOT include a sources section - it will be added automatically."""
                 
-                # Generate streaming response with proper safety settings
-                safety_settings = {
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                }
-                
-                response = self.report_model.generate_content(
-                    prompt,
-                    stream=True,  # Enable streaming
-                    generation_config={
-                        'temperature': 0.7,  # Slightly increase creativity
-                        'top_p': 0.9,  # More diverse output
-                        'max_output_tokens': 8192,  # Increased for longer reports
-                    },
-                    safety_settings=safety_settings
-                )
-                
-                self.logger.info("Starting report generation stream")
-                return response, sources_used
+                # Generate streaming response with enhanced safety settings and error handling
+                try:
+                    # Generate content synchronously since it's not awaitable
+                    response = self.report_model.generate_content(
+                        prompt,
+                        stream=True,
+                        generation_config={
+                            'temperature': 0.7,
+                            'top_p': 0.9,
+                            'max_output_tokens': 8192,
+                        },
+                        safety_settings=self.safety_settings
+                    )
+                    
+                    # Check for prompt feedback and blocking
+                    if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                        if any(feedback.block_reason for feedback in response.prompt_feedback):
+                            raise ValueError(f"Prompt blocked: {response.prompt_feedback}")
+                    
+                    # Verify we have a valid response
+                    if not response:
+                        raise ValueError("Invalid response from model")
+                    
+                    self.logger.info("Starting report generation stream")
+                    return response, sources_used
+                    
+                except Exception as model_error:
+                    self.logger.warning(f"Model generation error: {str(model_error)}")
+                    
+                    # Try with a simplified prompt if the original was too complex
+                    if attempt == max_retries - 1:  # On last attempt, try simplified prompt
+                        simplified_prompt = f"""Generate a research report on: '{main_query}'
+                        
+                        Key points to cover:
+                        - Main findings from the research
+                        - Analysis of key sources
+                        - Conclusions and recommendations
+                        
+                        Use the following structure:
+                        {report_structure}
+                        
+                        Format in clean Markdown."""
+                        
+                        response = await self.report_model.generate_content(
+                            simplified_prompt,
+                            stream=True,
+                            generation_config={
+                                'temperature': 0.7,
+                                'top_p': 0.9,
+                                'max_output_tokens': 8192,
+                            },
+                            safety_settings=self.safety_settings
+                        )
+                        
+                        if response and hasattr(response, 'text'):
+                            self.logger.info("Starting report generation with simplified prompt")
+                            return response, sources_used
+                    
+                    raise  # Re-raise the error if simplified prompt also fails
                 
             except Exception as e:
-                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                delay = base_delay * (2 ** attempt)
                 if attempt < max_retries - 1:
-                    error_msg = str(e)
                     self.logger.warning(
-                        f"Report generation attempt {attempt + 1} failed: {error_msg}\n"
+                        f"Report generation attempt {attempt + 1} failed: {str(e)}\n"
                         f"Retrying in {delay} seconds..."
                     )
                     await asyncio.sleep(delay)
-                    
-                    # If it's a specific error that might benefit from a smaller context, try reducing content
-                    if "500" in error_msg:
-                        # Reduce content size for next attempt
-                        for url in high_ranking_sources:
-                            if high_ranking_sources[url].get('content'):
-                                high_ranking_sources[url]['content'] = high_ranking_sources[url]['content'][:3000]
-                        self.logger.info("Reduced content size for next attempt")
                 else:
-                    self.logger.error(f"All report generation attempts failed: {e}")
+                    self.logger.error(f"All report generation attempts failed: {str(e)}")
                     return None, ""
         
         return None, ""
