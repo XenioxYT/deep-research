@@ -23,7 +23,7 @@ class MockSearchEngine:
     def __init__(self):
         pass
         
-    def list(self, q: str, cx: str, num: int = 20) -> 'MockSearchResponse':
+    def list(self, q: str, cx: str, num: int = 12) -> 'MockSearchResponse':
         """Mimic CSE list method"""
         try:
             # Get raw results and handle empty case
