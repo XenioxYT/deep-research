@@ -5,10 +5,11 @@ import asyncio
 import json
 import sys
 import os
-from typing import Dict, Set, Union, Callable
+from typing import Dict, Set, Union, Callable, Optional
 from datetime import datetime
 from pydantic import BaseModel
 import logging
+import signal
 
 # Add parent directory to path to import DeepResearchAgent
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -31,6 +32,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global application state
+class GlobalState:
+    def __init__(self):
+        self.is_researching: bool = False
+        self.current_query: Optional[str] = None
+        self.current_report: Optional[str] = None
+        self.logs: list = []
+        self.lock = asyncio.Lock()
+
+    def to_dict(self):
+        return {
+            "is_researching": self.is_researching,
+            "current_query": self.current_query,
+            "current_report": self.current_report,
+            "logs": self.logs
+        }
+
+    async def set_state(self, **kwargs):
+        async with self.lock:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+            await manager.broadcast_state_update()
+
+    async def add_log(self, log_entry):
+        async with self.lock:
+            self.logs.append(log_entry)
+            await manager.broadcast_state_update()
+
+global_state = GlobalState()
+
+# Store active research tasks
+active_tasks: Dict[str, asyncio.Task] = {}
+
 # Request model
 class ResearchRequest(BaseModel):
     query: str
@@ -48,6 +82,8 @@ class ConnectionManager:
             if client_id not in self.active_connections:
                 self.active_connections[client_id] = set()
             self.active_connections[client_id].add(websocket)
+            # Send current state to the new client
+            await self.send_state_to_client(websocket)
 
     def disconnect(self, websocket: WebSocket, client_id: str):
         if client_id in self.active_connections:
@@ -55,19 +91,48 @@ class ConnectionManager:
             if not self.active_connections[client_id]:
                 del self.active_connections[client_id]
 
-    async def broadcast_to_client(self, message: str, client_id: str):
-        if client_id in self.active_connections:
-            dead_connections = set()
-            for connection in self.active_connections[client_id]:
+    async def send_state_to_client(self, websocket: WebSocket):
+        """Send current application state to a specific client."""
+        try:
+            await websocket.send_text(json.dumps({
+                "type": "state_update",
+                "data": global_state.to_dict()
+            }))
+        except Exception:
+            pass
+
+    async def broadcast_state_update(self):
+        """Broadcast current state to all connected clients."""
+        state_message = json.dumps({
+            "type": "state_update",
+            "data": global_state.to_dict()
+        })
+        
+        for client_connections in self.active_connections.values():
+            for websocket in set(client_connections):
                 try:
-                    await connection.send_text(message)
-                except:
-                    dead_connections.add(connection)
+                    await websocket.send_text(state_message)
+                except Exception:
+                    continue
+
+    async def broadcast_to_client(self, message: str, client_id: str):
+        """Send a message to all WebSocket connections for a specific client."""
+        if client_id in self.active_connections:
+            connections = set(self.active_connections[client_id])
+            disconnected_sockets = set()
             
-            if dead_connections:
+            for websocket in connections:
+                try:
+                    await websocket.send_text(message)
+                except Exception:
+                    disconnected_sockets.add(websocket)
+
+            if disconnected_sockets:
                 async with self._lock:
-                    for dead in dead_connections:
-                        self.active_connections[client_id].discard(dead)
+                    if client_id in self.active_connections:
+                        self.active_connections[client_id] -= disconnected_sockets
+                        if not self.active_connections[client_id]:
+                            del self.active_connections[client_id]
 
 manager = ConnectionManager()
 
@@ -84,6 +149,9 @@ class HybridLogger(logging.Logger):
             "level": level,
             "message": message
         }
+        # Add to global state
+        await global_state.add_log(log_entry)
+        # Also send directly to the client for immediate feedback
         await manager.broadcast_to_client(
             json.dumps({"type": "log", "data": log_entry}),
             self.client_id
@@ -131,33 +199,78 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 # Research endpoint
 @app.post("/api/research")
 async def start_research(request: ResearchRequest):
+    # Check if research is already in progress
+    if global_state.is_researching:
+        return JSONResponse(
+            content={"status": "error", "message": "Research is already in progress"},
+            status_code=400
+        )
+
     try:
+        # Update global state
+        await global_state.set_state(
+            is_researching=True,
+            current_query=request.query,
+            current_report=None,
+            logs=[]
+        )
+
         # Create hybrid logger
         logger = HybridLogger(request.client_id)
         logger.info(f"Starting research for query: {request.query}")
 
-        # Initialize research agent with hybrid logger
-        async with DeepResearchAgent() as agent:
-            # Replace agent's logger with hybrid logger
-            agent.logger = logger
-            
-            # Start research
-            result = await agent.research(request.query)
-            
-            # Send completion message
-            logger.info("Research completed")
-            
-            return JSONResponse(
-                content={"status": "success", "result": result},
-                status_code=200
-            )
+        # Create and store the research task
+        async def research_task():
+            try:
+                async with DeepResearchAgent() as agent:
+                    agent.logger = logger
+                    report_path = await agent.research(request.query)
+                    
+                    if report_path.startswith("Report has been generated and saved to: "):
+                        report_path = report_path.replace("Report has been generated and saved to: ", "")
+                        try:
+                            with open(report_path, 'r', encoding='utf-8') as f:
+                                report_content = f.read()
+                        except Exception as e:
+                            logger.error(f"Error reading report file: {str(e)}")
+                            report_content = "Error: Could not read report content."
+                    else:
+                        report_content = report_path
+
+                    logger.info("Research completed")
+                    await global_state.set_state(
+                        is_researching=False,
+                        current_report=report_content
+                    )
+                    return {"status": "success", "result": report_content}
+            except Exception as e:
+                logger.error(f"Error during research: {str(e)}")
+                await global_state.set_state(is_researching=False)
+                return {"status": "error", "message": str(e)}
+
+        task = asyncio.create_task(research_task())
+        active_tasks[request.client_id] = task
+        result = await task
+
+        # Clean up task
+        if request.client_id in active_tasks:
+            del active_tasks[request.client_id]
+
+        return JSONResponse(content=result)
+
     except Exception as e:
         if 'logger' in locals():
             logger.error(f"Error during research: {str(e)}")
+        await global_state.set_state(is_researching=False)
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500
         )
+
+# Get current state endpoint
+@app.get("/api/state")
+async def get_state():
+    return JSONResponse(content=global_state.to_dict())
 
 # Health check endpoint
 @app.get("/health")

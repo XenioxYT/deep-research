@@ -10,7 +10,7 @@ export default defineConfig({
       strict: false,
       allow: [
         '..',
-        '../../node_modules/@fontsource',
+        path.resolve(__dirname, 'public'),
       ],
     },
     host: true, // Allow connections from all IPs
@@ -18,6 +18,12 @@ export default defineConfig({
       usePolling: true, // Enable polling for remote development
     },
   },
+  resolve: {
+    alias: {
+      '@fonts': path.resolve(__dirname, 'public/fonts'),
+    },
+  },
+  publicDir: 'public',
   optimizeDeps: {
     include: ['@fontsource/roboto'],
   },

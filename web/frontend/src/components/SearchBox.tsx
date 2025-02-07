@@ -1,14 +1,37 @@
-import { useState } from 'react';
-import { Paper, InputBase, IconButton, Box, Typography, CircularProgress } from '@mui/material';
+import { useState, useEffect } from 'react';
+import { Paper, InputBase, IconButton, Box, Typography, CircularProgress, Slide } from '@mui/material';
 import SearchIcon from '@mui/icons-material/Search';
+import { keyframes } from '@mui/system';
+
+const gradientAnimation = keyframes`
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+`;
 
 interface SearchBoxProps {
   onSearch: (query: string) => void;
   disabled?: boolean;
+  isResearching: boolean;
+  currentQuery: string | null;
+  isLoading: boolean;
 }
 
-const SearchBox = ({ onSearch, disabled = false }: SearchBoxProps) => {
+const SearchBox = ({ onSearch, disabled = false, isResearching, currentQuery, isLoading }: SearchBoxProps) => {
   const [query, setQuery] = useState('');
+
+  // Update local query when currentQuery changes
+  useEffect(() => {
+    if (currentQuery) {
+      setQuery(currentQuery);
+    }
+  }, [currentQuery]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,20 +41,35 @@ const SearchBox = ({ onSearch, disabled = false }: SearchBoxProps) => {
   };
 
   return (
-    <Box sx={{ textAlign: 'center', mt: 8, mb: 4 }}>
-      <Typography
-        variant="h3"
-        component="h1"
-        sx={{
-          mb: 4,
-          fontWeight: 500,
-          background: 'linear-gradient(45deg, #BB86FC 30%, #03DAC6 90%)',
-          WebkitBackgroundClip: 'text',
-          WebkitTextFillColor: 'transparent',
-        }}
-      >
-        Deep Research
-      </Typography>
+    <Box 
+      sx={{ 
+        textAlign: 'center',
+        transition: 'all 0.3s ease-in-out',
+        mt: isResearching ? 2 : 8,
+        mb: isResearching ? 2 : 4,
+        width: '100%',
+        opacity: isLoading ? 0.7 : 1,
+      }}
+    >
+      <Slide direction="down" in={!isResearching} mountOnEnter unmountOnExit>
+        <Typography
+          variant="h3"
+          component="h1"
+          sx={{
+            mb: 4,
+            fontWeight: 500,
+            fontFamily: '"Google Sans", sans-serif',
+            background: 'linear-gradient(90deg, #8B5CF6, #EC4899, #3B82F6, #8B5CF6)',
+            backgroundSize: '300% 100%',
+            animation: `${gradientAnimation} 8s ease infinite`,
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            backgroundClip: 'text',
+          }}
+        >
+          Deep Research
+        </Typography>
+      </Slide>
       <Paper
         component="form"
         onSubmit={handleSubmit}
@@ -40,13 +78,15 @@ const SearchBox = ({ onSearch, disabled = false }: SearchBoxProps) => {
           p: '4px',
           display: 'flex',
           alignItems: 'center',
-          maxWidth: 600,
+          width: isResearching ? '100%' : '600px',
           mx: 'auto',
           transition: 'all 0.3s ease-in-out',
           '&:hover': {
-            transform: 'translateY(-2px)',
-            boxShadow: (theme) => theme.shadows[6],
+            transform: (disabled || isLoading) ? 'none' : 'translateY(-2px)',
+            boxShadow: (theme) => (disabled || isLoading) ? theme.shadows[3] : theme.shadows[6],
           },
+          opacity: isLoading ? 0.7 : 1,
+          pointerEvents: isLoading ? 'none' : 'auto',
         }}
       >
         <InputBase
@@ -58,10 +98,10 @@ const SearchBox = ({ onSearch, disabled = false }: SearchBoxProps) => {
               padding: '12px 0',
             },
           }}
-          placeholder="What would you like to research?"
+          placeholder={isResearching ? currentQuery || '' : "What would you like to research?"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          disabled={disabled}
+          disabled={disabled || isLoading}
         />
         <IconButton
           type="submit"
@@ -72,9 +112,9 @@ const SearchBox = ({ onSearch, disabled = false }: SearchBoxProps) => {
               background: 'rgba(187, 134, 252, 0.1)',
             },
           }}
-          disabled={disabled}
+          disabled={disabled || isLoading}
         >
-          {disabled ? <CircularProgress size={24} /> : <SearchIcon />}
+          {isResearching || isLoading ? <CircularProgress size={24} /> : <SearchIcon />}
         </IconButton>
       </Paper>
     </Box>

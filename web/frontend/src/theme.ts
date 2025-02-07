@@ -1,5 +1,39 @@
 import { createTheme } from '@mui/material/styles';
 
+// Add Google Sans font faces
+const googleSansFontFaces = `
+@font-face {
+  font-family: 'Google Sans';
+  src: url('/fonts/ProductSans-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Google Sans';
+  src: url('/fonts/ProductSans-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Google Sans';
+  src: url('/fonts/ProductSans-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+`;
+
+// Insert font faces into document
+if (typeof document !== 'undefined') {
+  const style = document.createElement('style');
+  style.innerHTML = googleSansFontFaces;
+  document.head.appendChild(style);
+}
+
 const theme = createTheme({
   palette: {
     mode: 'dark',

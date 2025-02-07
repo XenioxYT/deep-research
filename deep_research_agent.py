@@ -904,7 +904,7 @@ class DeepResearchAgent:
            - Duplicate or redundant information
            - Low quality or unreliable sources
         4. Only continue research if genuinely valuable information is missing
-        5. Generate a custom report structure based on the query type and findings
+        5. Generate a custom report structure based on the query type and findings. If the query is simple, the report should be a simple answer to the query. If the query is complex, the report should be a comprehensive report with all the information needed to answer the query.
         6. Mark any unscraped URLs that should be scraped in the next iteration
         
         Format response EXACTLY as follows:
@@ -1136,7 +1136,9 @@ class DeepResearchAgent:
         if len(clean_query) > max_length:
             clean_query = clean_query[:max_length].rsplit('-', 1)[0]
         
-        return clean_query
+        # Add current time to the filename
+        current_time = datetime.now().strftime("%H-%M-%S")
+        return f"{clean_query}-{current_time}"
 
     def save_report_streaming(self, query: str, report_generator, sources_used: str):
         """Save the report to a markdown file in a streaming fashion."""
@@ -1149,15 +1151,6 @@ class DeepResearchAgent:
             
             # Create filename with date
             filename = f"reports/{clean_query}-{self.current_date}.md"
-            
-            # Write header first
-            header = f"""# Research Report: {query}
-Date: {self.current_date}
-Location: {self.approximate_location}
-
-"""
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(header)
             
             # Stream the report content
             with open(filename, 'a', encoding='utf-8') as f:
@@ -1260,6 +1253,7 @@ Location: {self.approximate_location}
                 - Use section headers with #, ##, and ###
                 - Use **bold** for emphasis on key points
                 - Format numbers naturally with proper thousands separators
+                - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
@@ -1543,26 +1537,38 @@ Location: {self.approximate_location}
                 break
         
         if not research_data['final_sources']:
-            if latest_report_structure and "simple" in explanation.lower():
-                self.logger.info("Simple query detected - generating report without sources")
-                report_generator, sources_used = await self.generate_report(
-                    query, research_data, latest_report_structure
-                )
-                
-                if report_generator:
-                    report_file = self.save_report_streaming(
-                        query, report_generator, sources_used
-                    )
-                    if report_file:
-                        self.logger.info(f"Report saved to: {report_file}")
-                        return f"Report has been generated and saved to: {report_file}"
-            
-            return "Error: No valid information could be gathered. Please try again or modify the query."
-        
-        # Generate and save streaming report
+            self.logger.warning("No sources were successfully scraped - continuing with limited information")
+            # Add a placeholder finding to ensure research data isn't empty
+            research_data['final_sources'].append({
+                'source': 'No sources available',
+                'content': 'No content could be successfully retrieved.',
+                'relevance_score': 0,
+                'is_top_result': False,
+                'scrape_level': 'LOW'
+            })
+            research_data['iterations'].append({
+                'queries_used': list(self.previous_queries),
+                'findings': research_data['final_sources']
+            })
+
+        # Generate and save streaming report (moved outside the if block)
         self.logger.info("Generating final report with streaming...")
         report_generator, sources_used = await self.generate_report(
-            query, research_data, latest_report_structure
+            query, research_data, latest_report_structure or """
+            # Research Report: {query}
+            
+            ## Summary
+            Present the main findings or lack thereof.
+            
+            ## Available Information
+            Detail any information found, even if limited.
+            
+            ## Limitations
+            Explain why information might be limited or unavailable.
+            
+            ## Recommendations
+            Suggest alternative approaches or queries if needed.
+            """
         )
         
         if report_generator:
