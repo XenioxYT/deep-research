@@ -111,6 +111,10 @@ const theme = createTheme({
         root: {
           '& .MuiOutlinedInput-root': {
             borderRadius: 12,
+            transition: 'box-shadow 0.3s ease-in-out',
+            '&.Mui-focused': {
+              boxShadow: '0 0 8px 2px rgba(187, 134, 252, 0.3)',
+            },
           },
         },
       },

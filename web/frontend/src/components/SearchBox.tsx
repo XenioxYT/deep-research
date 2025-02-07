@@ -1,122 +1,199 @@
-import { useState, useEffect } from 'react';
-import { Paper, InputBase, IconButton, Box, Typography, CircularProgress, Slide } from '@mui/material';
-import SearchIcon from '@mui/icons-material/Search';
-import { keyframes } from '@mui/system';
-
-const gradientAnimation = keyframes`
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
-`;
+import { Box, TextField, Button, Typography, CircularProgress } from '@mui/material';
+import { useState } from 'react';
 
 interface SearchBoxProps {
   onSearch: (query: string) => void;
-  disabled?: boolean;
+  disabled: boolean;
   isResearching: boolean;
   currentQuery: string | null;
   isLoading: boolean;
 }
 
-const SearchBox = ({ onSearch, disabled = false, isResearching, currentQuery, isLoading }: SearchBoxProps) => {
+const SearchBox = ({ onSearch, disabled, isResearching, currentQuery, isLoading }: SearchBoxProps) => {
   const [query, setQuery] = useState('');
-
-  // Update local query when currentQuery changes
-  useEffect(() => {
-    if (currentQuery) {
-      setQuery(currentQuery);
-    }
-  }, [currentQuery]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (query.trim() && !disabled) {
+    if (query.trim()) {
       onSearch(query.trim());
     }
   };
 
   return (
-    <Box 
-      sx={{ 
-        textAlign: 'center',
-        transition: 'all 0.3s ease-in-out',
-        mt: isResearching ? 2 : 8,
-        mb: isResearching ? 2 : 4,
-        width: '100%',
-        opacity: isLoading ? 0.7 : 1,
+    <Box
+      component="form"
+      onSubmit={handleSubmit}
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 4,
       }}
     >
-      <Slide direction="down" in={!isResearching} mountOnEnter unmountOnExit>
-        <Typography
-          variant="h3"
-          component="h1"
-          sx={{
-            mb: 4,
-            fontWeight: 500,
-            fontFamily: '"Google Sans", sans-serif',
-            background: 'linear-gradient(90deg, #8B5CF6, #EC4899, #3B82F6, #8B5CF6)',
-            backgroundSize: '300% 100%',
-            animation: `${gradientAnimation} 8s ease infinite`,
+      <Typography
+        variant="h2"
+        sx={{
+          fontFamily: '"Google Sans", sans-serif',
+          fontWeight: 500,
+          position: 'relative',
+          color: '#BB86FC',
+          textShadow: '0 0 20px rgba(187, 134, 252, 0.3)',
+          mb: 2,
+          '&::before': {
+            content: 'attr(data-text)',
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: '100%',
+            height: '100%',
+            background: 'linear-gradient(90deg, #BB86FC, #4285f4, #BB86FC)',
+            backgroundSize: '200% 100%',
+            animation: 'shimmer 6s ease-in-out infinite',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
-          }}
-        >
-          Deep Research
-        </Typography>
-      </Slide>
-      <Paper
-        component="form"
-        onSubmit={handleSubmit}
-        elevation={3}
-        sx={{
-          p: '4px',
-          display: 'flex',
-          alignItems: 'center',
-          width: isResearching ? '100%' : '600px',
-          mx: 'auto',
-          transition: 'all 0.3s ease-in-out',
-          '&:hover': {
-            transform: (disabled || isLoading) ? 'none' : 'translateY(-2px)',
-            boxShadow: (theme) => (disabled || isLoading) ? theme.shadows[3] : theme.shadows[6],
           },
-          opacity: isLoading ? 0.7 : 1,
-          pointerEvents: isLoading ? 'none' : 'auto',
+          '@keyframes shimmer': {
+            '0%': {
+              backgroundPosition: '100% 0',
+            },
+            '100%': {
+              backgroundPosition: '-100% 0',
+            },
+          },
+        }}
+        data-text="Deep Research"
+      >
+        Deep Research
+      </Typography>
+
+      <Box
+        sx={{
+          display: 'flex',
+          gap: 2,
+          width: '100%',
+          maxWidth: 800,
         }}
       >
-        <InputBase
+        <Box
           sx={{
-            ml: 2,
-            flex: 1,
-            fontSize: '1.1rem',
-            '& input': {
-              padding: '12px 0',
+            position: 'relative',
+            flexGrow: 1,
+            '&:hover::before, &:focus-within::before': {
+              content: '""',
+              position: 'absolute',
+              top: -2,
+              left: -2,
+              right: -2,
+              bottom: -2,
+              background: 'linear-gradient(-45deg, #BB86FC, #4285f4)',
+              backgroundSize: '200% 200%',
+              animation: 'gradient 5s ease infinite',
+              borderRadius: '14px',
+              zIndex: 0,
+              opacity: 0.5,
+              filter: 'blur(8px)',
+              transition: 'opacity 0.3s ease-in-out',
+            },
+            '@keyframes gradient': {
+              '0%': { backgroundPosition: '0% 50%' },
+              '50%': { backgroundPosition: '100% 50%' },
+              '100%': { backgroundPosition: '0% 50%' },
             },
           }}
-          placeholder={isResearching ? currentQuery || '' : "What would you like to research?"}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          disabled={disabled || isLoading}
-        />
-        <IconButton
-          type="submit"
-          sx={{
-            p: '12px',
-            color: 'primary.main',
-            '&:hover': {
-              background: 'rgba(187, 134, 252, 0.1)',
-            },
-          }}
-          disabled={disabled || isLoading}
         >
-          {isResearching || isLoading ? <CircularProgress size={24} /> : <SearchIcon />}
-        </IconButton>
-      </Paper>
+          <TextField
+            fullWidth
+            placeholder="Enter your research query..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            disabled={disabled}
+            sx={{
+              position: 'relative',
+              zIndex: 1,
+              '& .MuiOutlinedInput-root': {
+                backgroundColor: 'background.paper',
+                transition: 'all 0.3s ease-in-out',
+                '& .MuiOutlinedInput-notchedOutline': {
+                  borderColor: 'rgba(255, 255, 255, 0.1)',
+                  transition: 'border-color 0.3s ease-in-out',
+                },
+                '&:hover .MuiOutlinedInput-notchedOutline': {
+                  borderColor: 'rgba(255, 255, 255, 0.2)',
+                },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                  borderColor: '#BB86FC',
+                },
+              },
+            }}
+          />
+        </Box>
+
+        <Button
+          type="submit"
+          variant="contained"
+          disabled={disabled || !query.trim()}
+          sx={{
+            minWidth: 120,
+            backgroundColor: 'primary.main',
+            color: 'background.paper',
+            position: 'relative',
+            transition: 'all 0.3s ease-in-out',
+            '&:hover': {
+              backgroundColor: 'primary.dark',
+              transform: 'translateY(-1px)',
+            },
+            '&.Mui-disabled': {
+              backgroundColor: 'rgba(255, 255, 255, 0.1)',
+            },
+            '&::before': {
+              content: '""',
+              position: 'absolute',
+              top: -4,
+              left: -4,
+              right: -4,
+              bottom: -4,
+              background: 'linear-gradient(90deg, transparent, rgba(187, 134, 252, 0.4), transparent)',
+              backgroundSize: '200% 100%',
+              borderRadius: 'inherit',
+              opacity: 0,
+              filter: 'blur(8px)',
+              animation: query.trim() ? 'buttonPulse 1.5s ease forwards' : 'none',
+            },
+            '@keyframes buttonPulse': {
+              '0%': {
+                opacity: 0,
+                backgroundPosition: '200% 0',
+              },
+              '50%': {
+                opacity: 0.7,
+              },
+              '100%': {
+                opacity: 0,
+                backgroundPosition: '-100% 0',
+              },
+            },
+          }}
+        >
+          {isResearching ? (
+            <CircularProgress size={24} color="inherit" />
+          ) : (
+            'Research'
+          )}
+        </Button>
+      </Box>
+
+      {currentQuery && (
+        <Typography
+          variant="body2"
+          sx={{
+            color: 'text.secondary',
+            mt: -2,
+          }}
+        >
+          Current query: {currentQuery}
+        </Typography>
+      )}
     </Box>
   );
 };

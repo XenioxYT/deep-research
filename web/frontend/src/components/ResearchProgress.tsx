@@ -63,6 +63,7 @@ const LogGroupBox = styled(Box, {
   }),
   '&:hover': {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    boxShadow: '0 0 20px rgba(187, 134, 252, 0.1)',
   },
   ...(isActive && {
     animation: `${shimmer} 2s infinite linear`,
@@ -72,6 +73,7 @@ const LogGroupBox = styled(Box, {
       ${theme.palette.background.paper} 33%
     )`,
     backgroundSize: '2000px 100%',
+    boxShadow: '0 0 20px rgba(187, 134, 252, 0.2)',
   }),
 }));
 
@@ -80,8 +82,12 @@ const LogGroupHeader = styled(Box)(({ theme }) => ({
   alignItems: 'center',
   padding: theme.spacing(1.5, 2),
   cursor: 'pointer',
+  transition: theme.transitions.create(['background-color', 'box-shadow'], {
+    duration: theme.transitions.duration.short,
+  }),
   '&:hover': {
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    boxShadow: '0 0 20px rgba(187, 134, 252, 0.1)',
   },
 }));
 
@@ -111,12 +117,13 @@ const getGroupIcon = (type: string) => {
 
 const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
-  const logsEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const lastUserScrollPosition = useRef<number>(0);
   const lastContentHeight = useRef<number>(0);
   const isAutoExpanding = useRef(false);
+  const expandTimeoutRef = useRef<NodeJS.Timeout>();
+  const lastLogsLength = useRef<number>(0);
 
   const logGroups = useMemo(() => {
     const groups: LogGroup[] = [];
@@ -147,43 +154,58 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
     return groups;
   }, [logs]);
 
-  // Auto-expand latest group when it changes
+  // Track when logs change
+  useEffect(() => {
+    if (logs.length !== lastLogsLength.current) {
+      lastLogsLength.current = logs.length;
+      setShouldAutoScroll(true);
+      
+      // Ensure we're at the bottom after new logs are added
+      if (scrollContainerRef.current) {
+        const container = scrollContainerRef.current;
+        
+        // First timeout: wait for the new content to be rendered
+        setTimeout(() => {
+          // Second timeout: wait for the expansion animation
+          setTimeout(() => {
+            container.scrollTo({
+              top: container.scrollHeight,
+              behavior: 'smooth'
+            });
+          }, 300); // MUI Collapse animation duration
+        }, 0);
+      }
+    }
+  }, [logs]);
+
+  // Auto-expand latest group when logs change
   useEffect(() => {
     if (logGroups.length > 0) {
       isAutoExpanding.current = true;
-      setExpandedGroups(prev => {
-        const next = new Set(prev);
-        next.add(logGroups.length - 1);
-        return next;
-      });
+      setExpandedGroups(new Set([logGroups.length - 1]));
+      
+      // Ensure we scroll after expanding
+      if (scrollContainerRef.current) {
+        const container = scrollContainerRef.current;
+        
+        // Wait for both content update and expansion animation
+        setTimeout(() => {
+          container.scrollTo({
+            top: container.scrollHeight,
+            behavior: 'smooth'
+          });
+          isAutoExpanding.current = false;
+        }, 350); // Slightly longer than the animation to ensure completion
+      }
     }
   }, [logGroups.length]);
 
-  useEffect(() => {
-    if (scrollContainerRef.current) {
-      const container = scrollContainerRef.current;
-      const { scrollHeight, clientHeight } = container;
-      
-      // If content height has changed and we're in auto-scroll mode or it was triggered by auto-expand
-      if ((shouldAutoScroll || isAutoExpanding.current) && scrollHeight !== lastContentHeight.current) {
-        container.scrollTo({
-          top: scrollHeight,
-          behavior: isAutoExpanding.current ? 'smooth' : 'auto'
-        });
-        isAutoExpanding.current = false;
-      }
-      
-      lastContentHeight.current = scrollHeight;
-    }
-  }, [logs, shouldAutoScroll, expandedGroups]);
-
+  // Handle scroll position changes
   const handleScroll = () => {
     if (scrollContainerRef.current) {
       const { scrollHeight, clientHeight, scrollTop } = scrollContainerRef.current;
       const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
       
-      // Only update shouldAutoScroll if the user has actually scrolled
-      // (not when the content has changed)
       if (Math.abs(scrollTop - lastUserScrollPosition.current) > 10) {
         setShouldAutoScroll(isNearBottom);
         lastUserScrollPosition.current = scrollTop;
@@ -199,6 +221,13 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
         next.delete(index);
       } else {
         next.add(index);
+        // Scroll to the expanded group after animation
+        expandTimeoutRef.current = setTimeout(() => {
+          const element = document.getElementById(`log-group-${index}`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        }, 300);
       }
       return next;
     });
@@ -232,6 +261,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
           backgroundColor: 'background.paper',
           borderRadius: 2,
           transition: 'all 0.3s ease-in-out',
+          scrollBehavior: 'smooth',
           '&::-webkit-scrollbar': {
             width: '8px',
           },
@@ -256,7 +286,10 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
         
         {logGroups.map((group, groupIndex) => (
           <Fade in={true} key={groupIndex} timeout={300}>
-            <LogGroupBox isActive={groupIndex === logGroups.length - 1}>
+            <LogGroupBox 
+              id={`log-group-${groupIndex}`}
+              isActive={groupIndex === logGroups.length - 1}
+            >
               <LogGroupHeader onClick={() => toggleGroup(groupIndex)}>
                 <Typography
                   variant="subtitle1"
@@ -336,7 +369,6 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
             </LogGroupBox>
           </Fade>
         ))}
-        <div ref={logsEndRef} />
       </Paper>
     </Fade>
   );
