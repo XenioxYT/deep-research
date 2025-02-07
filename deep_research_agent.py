@@ -556,7 +556,7 @@ class DeepResearchAgent:
                     
                     # Configure page timeouts
                     page.set_default_navigation_timeout(20000)
-                    page.set_default_timeout(15000)
+                    page.set_default_timeout(5000)
                     
                     # Try to load the page with retry logic
                     content = ""
@@ -569,7 +569,7 @@ class DeepResearchAgent:
                             response = await page.goto(
                                 url,
                                 wait_until='domcontentloaded',
-                                timeout=15000
+                                timeout=5000
                             )
                             
                             if not response or not response.ok:
@@ -822,47 +822,6 @@ class DeepResearchAgent:
         
         return ranked_results
 
-    def extract_content(self, url: str) -> str:
-        """Extract main content from a webpage using Playwright."""
-        self.logger.info(f"Extracting content: {url}")
-        try:
-            page = self.context.new_page()
-            page.goto(url, wait_until='networkidle', timeout=20000)
-            
-            # Wait for content to load
-            page.wait_for_selector('body', timeout=5000)
-            
-            # Remove unwanted elements
-            page.evaluate("""() => {
-                const selectors = ['script', 'style', 'nav', 'header', 'footer', 'iframe', 'aside', 'form'];
-                selectors.forEach(selector => {
-                    document.querySelectorAll(selector).forEach(el => el.remove());
-                });
-            }""")
-            
-            # Extract text from main content elements
-            content = page.evaluate("""() => {
-                const contentElements = document.querySelectorAll('article, main, .content, .post, p, h1, h2, h3, h4, h5, h6');
-                const textContent = [];
-                
-                contentElements.forEach(elem => {
-                    const text = elem.textContent.trim();
-                    if (text.length >= 50 && elem.querySelectorAll('a').length < 5) {
-                        textContent.push(text);
-                    }
-                });
-                
-                return textContent.join(' ');
-            }""")
-            
-            page.close()
-            
-            self.logger.info(f"Extracted {len(content)} characters")
-            return content
-        except Exception as e:
-            self.logger.error(f"Extraction error: {e}")
-            return ""
-
     def analyze_research_state(self, main_query: str, current_data: Dict) -> Tuple[bool, str, List[str], str]:
         """Analyze current research state and decide if more research is needed."""
         self.logger.info("Analyzing research state...")
@@ -1050,28 +1009,38 @@ class DeepResearchAgent:
             self.logger.error(f"Analysis error: {e}")
             return False, str(e), [], ""
 
-    def save_report(self, query: str, report: str):
+    def save_report_streaming(self, query: str, report_text, sources_used: str):
         """Save the report to a markdown file."""
         try:
             # Create reports directory if it doesn't exist
             os.makedirs('reports', exist_ok=True)
             
-            # Clean query for filename
-            clean_query = re.sub(r'[^\w\s-]', '', query).strip().lower()
-            clean_query = re.sub(r'[-\s]+', '-', clean_query)
+            # Clean and truncate query for filename
+            clean_query = self.clean_filename(query)
             
             # Create filename with date
             filename = f"reports/{clean_query}-{self.current_date}.md"
             
-            # Add metadata to report
-            full_report = f"{report}"
-            
+            # Write the report content
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write(full_report)
+                try:
+                    # Write the report text
+                    if report_text:
+                        f.write(report_text)
+                        self.log_token_usage(report_text, "Report content")
+                    
+                    # Add the sources section at the end
+                    f.write("\n\n")  # Add some spacing
+                    f.write(sources_used)
+                except Exception as e:
+                    self.logger.error(f"Error writing report: {e}")
+                    raise  # Re-raise to be caught by outer try-except
             
             self.logger.info(f"Report saved to {filename}")
+            return filename
         except Exception as e:
             self.logger.error(f"Error saving report: {e}")
+            return None
 
     def count_tokens(self, text: str) -> int:
         """Count tokens accurately using Gemini's token counter."""
@@ -1124,42 +1093,8 @@ class DeepResearchAgent:
         current_time = datetime.now().strftime("%H-%M-%S")
         return f"{clean_query}-{current_time}"
 
-    def save_report_streaming(self, query: str, report_generator, sources_used: str):
-        """Save the report to a markdown file in a streaming fashion."""
-        try:
-            # Create reports directory if it doesn't exist
-            os.makedirs('reports', exist_ok=True)
-            
-            # Clean and truncate query for filename
-            clean_query = self.clean_filename(query)
-            
-            # Create filename with date
-            filename = f"reports/{clean_query}-{self.current_date}.md"
-            
-            # Stream the report content
-            with open(filename, 'a', encoding='utf-8') as f:
-                try:
-                    for chunk in report_generator:
-                        if chunk and chunk.text:  # Check both chunk and text exist
-                            f.write(chunk.text)  # Remove ASCII encoding restriction
-                            f.flush()  # Ensure content is written immediately
-                            # Log progress
-                            self.log_token_usage(chunk.text, "Report streaming chunk")
-                except Exception as e:
-                    self.logger.error(f"Error during streaming: {e}")
-                
-                # Add the sources section at the end
-                f.write(sources_used)
-                f.flush()
-            
-            self.logger.info(f"Report saved to {filename}")
-            return filename
-        except Exception as e:
-            self.logger.error(f"Error saving streaming report: {e}")
-            return None
-
     async def generate_report(self, main_query: str, research_data: Dict, report_structure: str) -> Tuple[str, str]:
-        """Generate a comprehensive report from the gathered research data with streaming output."""
+        """Generate a comprehensive report from the gathered research data."""
         max_retries = 3
         base_delay = 2  # Base delay in seconds
         
@@ -1246,65 +1181,28 @@ class DeepResearchAgent:
                 
                 DO NOT include a sources section - it will be added automatically."""
                 
-                # Generate streaming response with enhanced safety settings and error handling
-                try:
-                    # Generate content synchronously since it's not awaitable
-                    response = self.report_model.generate_content(
-                        prompt,
-                        stream=True,
-                        generation_config={
-                            'temperature': 0.7,
-                            'top_p': 0.9,
-                            'max_output_tokens': 8192,
-                        },
-                        safety_settings=self.safety_settings
-                    )
-                    
-                    # Check for prompt feedback and blocking
-                    if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
-                        if any(feedback.block_reason for feedback in response.prompt_feedback):
-                            raise ValueError(f"Prompt blocked: {response.prompt_feedback}")
-                    
-                    # Verify we have a valid response
-                    if not response:
-                        raise ValueError("Invalid response from model")
-                    
-                    self.logger.info("Starting report generation stream")
-                    return response, sources_used
-                    
-                except Exception as model_error:
-                    self.logger.warning(f"Model generation error: {str(model_error)}")
-                    
-                    # Try with a simplified prompt if the original was too complex
-                    if attempt == max_retries - 1:  # On last attempt, try simplified prompt
-                        simplified_prompt = f"""Generate a research report on: '{main_query}'
-                        
-                        Key points to cover:
-                        - Main findings from the research
-                        - Analysis of key sources
-                        - Conclusions and recommendations
-                        
-                        Use the following structure:
-                        {report_structure}
-                        
-                        Format in clean Markdown."""
-                        
-                        response = await self.report_model.generate_content(
-                            simplified_prompt,
-                            stream=True,
-                            generation_config={
-                                'temperature': 0.7,
-                                'top_p': 0.9,
-                                'max_output_tokens': 8192,
-                            },
-                            safety_settings=self.safety_settings
-                        )
-                        
-                        if response and hasattr(response, 'text'):
-                            self.logger.info("Starting report generation with simplified prompt")
-                            return response, sources_used
-                    
-                    raise  # Re-raise the error if simplified prompt also fails
+                # Generate response
+                response = self.report_model.generate_content(
+                    prompt,
+                    generation_config={
+                        'temperature': 0.7,
+                        'top_p': 0.9,
+                        'max_output_tokens': 8192,
+                    },
+                    safety_settings=self.safety_settings
+                )
+                
+                # Check for prompt feedback and blocking
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                    if any(feedback.block_reason for feedback in response.prompt_feedback):
+                        raise ValueError(f"Prompt blocked: {response.prompt_feedback}")
+                
+                # Verify we have a valid response
+                if not response or not response.text:
+                    raise ValueError("Invalid response from model")
+                
+                self.logger.info("Report generation completed")
+                return response.text, sources_used
                 
             except Exception as e:
                 delay = base_delay * (2 ** attempt)
@@ -1570,18 +1468,6 @@ class DeepResearchAgent:
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
-
-    def store_content(self, url: str, content: str, content_type: str = "FULL"):
-        """Store content with token counting."""
-        try:
-            # Count tokens before truncation
-            tokens = self.count_tokens(content)
-            self.content_tokens += tokens
-            self.logger.info(f"Content tokens for {url}: {tokens:,} (Total content tokens: {self.content_tokens:,})")
-            
-            # ... existing storage logic ...
-        except Exception as e:
-            self.logger.error(f"Error storing content: {e}")
 
 def main():
     """Run the research agent with proper async handling."""
