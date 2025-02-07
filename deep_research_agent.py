@@ -82,7 +82,7 @@ class DeepResearchAgent:
         self.blacklisted_urls = set()
         self.scraped_urls = set()  # Track already scraped URLs
         self.research_iterations = 0
-        self.MAX_ITERATIONS = 3
+        self.MAX_ITERATIONS = 9
         self.system_context = system_context
         self.total_tokens = 0  # Track total tokens used
         
@@ -331,7 +331,7 @@ class DeepResearchAgent:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
 
-    async def batch_web_search(self, queries: List[str], num_results: int = 12) -> List[Dict]:
+    async def batch_web_search(self, queries: List[str], num_results: int = 8) -> List[Dict]:
         """Perform multiple web searches in parallel with increased batch size."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
@@ -698,9 +698,9 @@ class DeepResearchAgent:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
         3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
-           - LOW: 3000 chars - For basic/overview content
-           - MEDIUM: 6000 chars - For moderate detail (default)
-           - HIGH: 12000 chars - For in-depth analysis
+           - LOW: 1500 chars - For basic/overview content (default)
+           - MEDIUM: 3000 chars - For moderate detail
+           - HIGH: 8000 chars - For in-depth analysis
         
         Consider these factors:
         - Content depth and relevance to query
@@ -747,14 +747,14 @@ class DeepResearchAgent:
                     rankings[url] = score
                     
                     # Only mark for scraping if we haven't hit our limit
-                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 20
+                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 10
                     if should_scrape:
                         scrape_count += 1
                     
                     # Validate and normalize scraping level
                     scrape_level = scrape_level.upper()
                     if scrape_level not in ['LOW', 'MEDIUM', 'HIGH']:
-                        scrape_level = 'MEDIUM'  # Default to medium if invalid
+                        scrape_level = 'LOW'  # Default to LOW if invalid
                     
                     scrape_decisions[url] = {
                         'should_scrape': should_scrape,
@@ -815,7 +815,7 @@ class DeepResearchAgent:
             'MEDIUM': 3000,
             'HIGH': 8000
         }
-        return limits.get(scrape_level.upper(), 3000)  # Default to MEDIUM if invalid
+        return limits.get(scrape_level.upper(), 1500)  # Default to LOW if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -881,11 +881,15 @@ class DeepResearchAgent:
         prompt = f"""{self.system_context}
         Analyze the research on: '{main_query}'
         Current data: {json.dumps(current_data, indent=2)}
+        Current iteration: {self.research_iterations}
         
         IMPORTANT DECISION GUIDELINES:
         1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately and mark as SIMPLE
         2. For queries that can be fully answered with current findings, say NO
-        3. For queries needing more depth/verification, say YES and specify what's missing
+        3. For queries needing more depth/verification:
+           - On iteration 0-1: Say YES if significant information is missing
+           - On iteration 2: Only say YES if crucial information is missing
+           - On iteration 3+: Strongly lean towards NO unless absolutely critical information is missing
         4. Consider the query ANSWERED when you have:
            - Sufficient high-quality sources (relevance_score > 0.6)
            - Enough information to provide a comprehensive answer
@@ -906,9 +910,9 @@ class DeepResearchAgent:
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
         TYPE: [SIMPLE/COMPLEX]
-        REASON: [One clear sentence explaining the decision]
+        REASON: [One clear sentence explaining the decision, mentioning iteration number if relevant]
         REMOVE_URLS: [List URLs to remove from context, one per line, with brief reason after # symbol]
-        BLACKLIST: [List URLs to blacklist, one per line]
+        BLACKLIST: [List URLs to blacklist, one per line. These URLs will be ignored in future iterations.]
         MISSING: [List missing information aspects, one per line]
         SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
         SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
@@ -1468,7 +1472,7 @@ Location: {self.approximate_location}
                     
                     # Determine content length based on URL priority
                     if url == top_url:
-                        content_to_store = content
+                        content_to_store = content[:10000]
                         self.logger.info(f"Storing full content ({len(content)} chars) for top URL: {url}")
                     else:
                         scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
