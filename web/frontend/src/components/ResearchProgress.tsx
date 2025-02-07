@@ -24,14 +24,14 @@ interface LogGroup {
 
 const shimmer = keyframes`
   0% {
-    background-position: -1000px 0;
+    background-position: -2000px 0;
     box-shadow: 0 0 20px rgba(0, 0, 0, 0);
   }
   50% {
     box-shadow: 0 0 20px rgba(187, 134, 252, 0.25);
   }
   100% {
-    background-position: 1000px 0;
+    background-position: 2000px 0;
     box-shadow: 0 0 20px rgba(0, 0, 0, 0);
   }
 `;
@@ -85,7 +85,7 @@ const LogGroupBox = styled(Box)<{ isActive?: boolean }>(({ theme, isActive }) =>
       ${theme.palette.action.hover} 20%,
       ${theme.palette.background.paper} 40%
     )`,
-    backgroundSize: '1000px 100%',
+    backgroundSize: '2000px 100%',
   }),
 }));
 

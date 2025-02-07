@@ -175,7 +175,16 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
   },
 }));
 
-const SourceTooltip = styled(Tooltip)(() => ({
+const SourceTooltip = styled(({ className, title, children, ...props }: {
+  className?: string;
+  title: React.ReactElement;
+  children: React.ReactElement;
+  [key: string]: any;
+}) => (
+  <Tooltip {...props} classes={{ popper: className }} title={title}>
+    {children}
+  </Tooltip>
+))(({ theme }) => ({
   '& .MuiTooltip-tooltip': {
     backgroundColor: 'transparent',
     padding: 0,
