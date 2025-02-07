@@ -1238,7 +1238,8 @@ class DeepResearchAgent:
                 - Use **bold** for emphasis on key points
                 - Format numbers naturally with proper thousands separators
                 - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
-                - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate.
+                - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate. Be sure to mention when and where you have used your own knowledge!
+                - You can use LATEX formatting. ALWAYS wrap mathematical equations in $$.
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).

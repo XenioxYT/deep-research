@@ -2,6 +2,9 @@ import { Paper, Box, Fade, Typography, Container, useTheme, useMediaQuery, Toolt
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import { styled } from '@mui/material/styles';
 import { useMemo } from 'react';
 
@@ -226,32 +229,85 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
       return text;
     }
 
-    // First collect all code blocks
-    const codeBlocks: Array<{
-      placeholder: string;
-      content: string;
-    }> = [];
-    let currentIndex = 0;
+    // First process citations
+    const parts = text.split(/(\[\d+\](?:\s*\[\d+\])*(?:[.,]?\s*|\.$|\)?|$))/g);
+    const processedParts = parts.map((part, partIndex) => {
+      const ref = part.match(/^\[\d+\]$/);
+      if (ref) {
+        const source = sources.get(ref[0]);
+        if (source) {
+          return (
+            <SourceTooltip
+              key={`${ref}-${partIndex}`}
+              title={
+                <SourceCard>
+                  <CardContent>
+                    <Typography variant="subtitle1" gutterBottom>
+                      {source.title}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" component="a" 
+                      href={source.url} 
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      sx={{ 
+                        display: 'block', 
+                        mb: 1,
+                        color: 'primary.main',
+                        textDecoration: 'none',
+                        '&:hover': {
+                          textDecoration: 'underline',
+                        },
+                      }}
+                    >
+                      {source.url}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Relevance Score: {source.score.toFixed(2)}
+                    </Typography>
+                  </CardContent>
+                </SourceCard>
+              }
+              placement="top"
+              arrow
+            >
+              <Box
+                component="span"
+                sx={{
+                  color: 'primary.main',
+                  cursor: 'pointer',
+                  '&:hover': {
+                    textDecoration: 'underline',
+                  },
+                  display: 'inline',
+                }}
+              >
+                {ref[0]}
+              </Box>
+            </SourceTooltip>
+          );
+        }
+      }
 
-    // Replace backtick content with placeholders and collect code blocks
-    const textWithPlaceholders = text.replace(/`[^`]+`/g, (match) => {
-      const placeholder = `__CODE_BLOCK_${currentIndex}__`;
-      codeBlocks.push({
-        placeholder,
-        content: match.slice(1, -1) // Remove backticks
+      // Then process code blocks within non-citation text
+      const codeBlocks: Array<{
+        placeholder: string;
+        content: string;
+      }> = [];
+      let currentIndex = 0;
+
+      // Replace backtick content with placeholders and collect code blocks
+      const textWithPlaceholders = part.replace(/`[^`]+`/g, (match) => {
+        const placeholder = `__CODE_BLOCK_${currentIndex}__`;
+        codeBlocks.push({
+          placeholder,
+          content: match.slice(1, -1) // Remove backticks
+        });
+        currentIndex++;
+        return placeholder;
       });
-      currentIndex++;
-      return placeholder;
-    });
 
-    // Process references in the remaining text
-    const parts = textWithPlaceholders.split(/(\[\d+\](?:\s*\[\d+\])*(?:[.,]?\s*|\.$|\)?|$))/g);
-    
-    // Process each part
-    return parts.map((part, partIndex) => {
-      // First process any code blocks in this part
       const elements: React.ReactNode[] = [];
-      let remainingText = part;
+      let remainingText = textWithPlaceholders;
 
       // Replace code block placeholders with actual components
       codeBlocks.forEach(({ placeholder, content }) => {
@@ -281,81 +337,16 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
         }
       });
 
-      // If there's remaining text, process it for references
       if (remainingText) {
-        const refs = remainingText.match(/\[\d+\]/g);
-        if (refs) {
-          let lastIndex = 0;
-          
-          refs.forEach((ref, refIndex) => {
-            const source = sources.get(ref);
-            if (source) {
-              if (refIndex === 0) {
-                const beforeText = remainingText.slice(0, remainingText.indexOf(ref));
-                if (beforeText) elements.push(beforeText);
-              }
-              
-              elements.push(
-                <SourceTooltip
-                  key={`${ref}-${partIndex}-${refIndex}`}
-                  title={
-                    <SourceCard>
-                      <CardContent>
-                        <Typography variant="subtitle1" gutterBottom>
-                          {source.title}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" component="a" 
-                          href={source.url} 
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          sx={{ 
-                            display: 'block', 
-                            mb: 1,
-                            color: 'primary.main',
-                            textDecoration: 'none',
-                            '&:hover': {
-                              textDecoration: 'underline',
-                            },
-                          }}
-                        >
-                          {source.url}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          Relevance Score: {source.score.toFixed(2)}
-                        </Typography>
-                      </CardContent>
-                    </SourceCard>
-                  }
-                  placement="top"
-                  arrow
-                >
-                  <Box
-                    component="span"
-                    sx={{
-                      color: 'primary.main',
-                      cursor: 'pointer',
-                      '&:hover': {
-                        textDecoration: 'underline',
-                      },
-                    }}
-                  >
-                    {ref}
-                  </Box>
-                </SourceTooltip>
-              );
-              lastIndex = remainingText.indexOf(ref) + ref.length;
-            }
-          });
-          
-          const afterText = remainingText.slice(lastIndex);
-          if (afterText) elements.push(afterText);
-        } else {
-          elements.push(remainingText);
-        }
+        elements.push(remainingText);
       }
 
-      return <React.Fragment key={`part-${partIndex}`}>{elements}</React.Fragment>;
+      return elements.length > 0 ? (
+        <React.Fragment key={`part-${partIndex}`}>{elements}</React.Fragment>
+      ) : part;
     });
+
+    return <>{processedParts}</>;
   };
 
   return (
@@ -378,7 +369,8 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
           <StyledMarkdown>
             <ReactMarkdown
               className="markdown-body"
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={[rehypeKatex]}
               components={{
                 p: ({ children }) => (
                   <Typography variant="body1" paragraph>
@@ -461,6 +453,59 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
                     {renderText(children)}
                   </Typography>
                 ),
+                code: ({ node, inline, className, children, ...props }: {
+                  node?: any;
+                  inline?: boolean;
+                  className?: string;
+                  children: React.ReactNode;
+                  [key: string]: any;
+                }) => {
+                  const match = /language-(\w+)/.exec(className || '');
+                  const isLatex = match && match[1] === 'latex';
+                  
+                  if (inline) {
+                    return (
+                      <Typography
+                        component="code"
+                        sx={{
+                          backgroundColor: 'rgba(187, 134, 252, 0.1)',
+                          color: theme.palette.primary.light,
+                          padding: '2px 6px',
+                          borderRadius: 1,
+                          fontSize: '0.9em',
+                          fontFamily: 'Roboto Mono, monospace',
+                          display: 'inline',
+                        }}
+                        {...props}
+                      >
+                        {children}
+                      </Typography>
+                    );
+                  }
+
+                  return (
+                    <Box
+                      component="pre"
+                      sx={{
+                        backgroundColor: 'rgba(187, 134, 252, 0.05)',
+                        padding: theme.spacing(2),
+                        borderRadius: theme.shape.borderRadius,
+                        overflow: 'auto',
+                        margin: theme.spacing(2, 0),
+                        '& code': {
+                          backgroundColor: 'transparent',
+                          padding: 0,
+                          fontSize: '0.9em',
+                          fontFamily: 'Roboto Mono, monospace',
+                        },
+                      }}
+                    >
+                      <code className={className} {...props}>
+                        {children}
+                      </code>
+                    </Box>
+                  );
+                },
               }}
             >
               {processedContent}
