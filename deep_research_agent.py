@@ -696,9 +696,9 @@ class DeepResearchAgent:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
         3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
-           - LOW: 1500 chars - For basic/overview content (default)
-           - MEDIUM: 3000 chars - For moderate detail
-           - HIGH: 8000 chars - For in-depth analysis
+           - LOW: 3000 chars - For basic/overview content (default)
+           - MEDIUM: 6000 chars - For moderate detail
+           - HIGH: 10000 chars - For in-depth analysis
         
         Consider these factors:
         - Content depth and relevance to query
@@ -751,7 +751,7 @@ class DeepResearchAgent:
                     # Validate and normalize scraping level
                     scrape_level = scrape_level.upper()
                     if scrape_level not in ['LOW', 'MEDIUM', 'HIGH']:
-                        scrape_level = 'LOW'  # Default to LOW if invalid
+                        scrape_level = 'MEDIUM'  # Default to LOW if invalid
                     
                     scrape_decisions[url] = {
                         'should_scrape': should_scrape,
@@ -800,11 +800,11 @@ class DeepResearchAgent:
     def get_scrape_limit(self, scrape_level: str) -> int:
         """Get character limit based on scraping level."""
         limits = {
-            'LOW': 1500,
-            'MEDIUM': 3000,
-            'HIGH': 8000
+            'LOW': 3000,
+            'MEDIUM': 6000,
+            'HIGH': 10000
         }
-        return limits.get(scrape_level.upper(), 1500)  # Default to LOW if invalid
+        return limits.get(scrape_level.upper(), 3000)  # Default to LOW if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -835,9 +835,9 @@ class DeepResearchAgent:
         1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately and mark as SIMPLE
         2. For queries that can be fully answered with current findings, say NO
         3. For queries needing more depth/verification:
-           - On iteration 0-1: Say YES if significant information is missing
-           - On iteration 2: Only say YES if crucial information is missing
-           - On iteration 3+: Strongly lean towards NO unless absolutely critical information is missing
+           - On iteration 0-2: Say YES if information is missing
+           - On iteration 3: Only say YES if crucial information is missing
+           - On iteration 4+: Strongly lean towards NO unless absolutely critical information is missing
         4. Consider the query ANSWERED when you have:
            - Sufficient high-quality sources (relevance_score > 0.6)
            - Enough information to provide a comprehensive answer
@@ -1143,6 +1143,7 @@ class DeepResearchAgent:
                     sources_used += f"- Relevance Score: {data['score']:.2f}\n"
                     sources_used += f"- Domain: {data['domain']}\n\n"
                 
+                # Enhanced report context with version tracking
                 report_context = {
                     'main_query': main_query,
                     'research_data': research_data,
@@ -1157,6 +1158,15 @@ class DeepResearchAgent:
                         for iter_data in research_data['iterations']
                     ]
                 }
+
+                # Add version-specific context
+                if 'initial_report' in research_data:
+                    report_context.update({
+                        'is_revision': True,
+                        'initial_report': research_data['initial_report'],
+                        'review_feedback': research_data.get('review_feedback', {}),
+                        'previous_versions': research_data.get('report_versions', [])
+                    })
                 
                 prompt = f"""Generate a comprehensive research report on: '{main_query}'
                 Using the following information:
@@ -1164,6 +1174,13 @@ class DeepResearchAgent:
                 
                 Follow this custom report structure and guidelines:
                 {report_structure}
+
+                {'This is a REVISED report. You must:' if 'is_revision' in report_context else ''}
+                {'1. Address the review feedback and missing aspects identified' if 'is_revision' in report_context else ''}
+                {'2. Incorporate new findings while maintaining relevant information from the initial report' if 'is_revision' in report_context else ''}
+                {'3. Highlight significant changes or additions from the initial version' if 'is_revision' in report_context else ''}
+                {'4. Provide a synthesis of all findings' if 'is_revision' in report_context else ''}
+                
                 Include an "Opinion" section at the end of the report. This should focus on your views on the topic and the sources used to form those views.
                 The report should be long and detailed, and should include all the information from the sources used.
                 Contradictions in sources should be noted and explained, and the report should provide a conclusion that takes into account the contradictions.
@@ -1174,7 +1191,7 @@ class DeepResearchAgent:
                 - Format numbers naturally with proper thousands separators
                 - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
                 - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate. Be sure to mention when and where you have used your own knowledge!
-                - You can use LATEX formatting. ALWAYS wrap mathematical equations in $$.
+                - You can use LATEX formatting. ALWAYS wrap mathematical equations in $$[latex]$$
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
@@ -1218,6 +1235,210 @@ class DeepResearchAgent:
         
         return None, ""
 
+    async def review_report(self, query: str, report_text: str, research_data: Dict) -> Tuple[bool, str, List[str], List[str]]:
+        """
+        Review the generated report for completeness and quality.
+        Returns: (is_approved, review_notes, missing_aspects, additional_queries)
+        """
+        # Use a separate model for review to get a fresh perspective
+        review_model = genai.GenerativeModel(
+            'gemini-2.0-flash-exp',
+            safety_settings=self.safety_settings
+        )
+        
+        # Enhanced review prompt with more specific criteria
+        prompt = f"""Review this research report on: '{query}'
+        
+        Report Text:
+        {report_text}
+        
+        Research Context:
+        - Total sources analyzed: {len(self.all_results)}
+        - High-ranking sources used: {len(self.high_ranking_urls)}
+        - Research iterations: {self.research_iterations}
+        - Previous queries used: {list(self.previous_queries)}
+        
+        Analyze the report based on these specific criteria:
+
+        1. Completeness (30 points):
+        - Are all aspects of the query addressed?
+        - Is there sufficient background information?
+        - Are all relevant perspectives covered?
+
+        2. Depth (25 points):
+        - Is the analysis thorough and detailed?
+        - Are complex concepts well explained?
+        - Is there adequate supporting evidence?
+
+        3. Evidence Quality (20 points):
+        - Are claims supported by credible sources?
+        - Is source information recent and relevant?
+        - Are contradictions or conflicts addressed?
+
+        4. Structure and Clarity (15 points):
+        - Is the report well-organized?
+        - Is the writing clear and professional?
+        - Are sections properly connected?
+
+        5. Technical Accuracy (10 points):
+        - Are facts and figures accurate?
+        - Are technical terms used correctly?
+        - Are calculations or data interpretations sound?
+
+        Format your response EXACTLY as:
+        APPROVED: [YES/NO]
+        SCORE: [0-100]
+        REVIEW:
+        [Detailed review notes with specific examples]
+        
+        SCORES_BREAKDOWN:
+        Completeness: [X/30]
+        Depth: [X/25]
+        Evidence: [X/20]
+        Structure: [X/15]
+        Accuracy: [X/10]
+        
+        MISSING_ASPECTS:
+        [List specific missing information or aspects that need more research, one per line]
+        
+        SEARCH_QUERIES:
+        [If not approved, list of 15 specific search queries to find the missing information]
+        
+        IMPROVEMENT_SUGGESTIONS:
+        [List specific suggestions for improving the report]
+        """
+        
+        try:
+            response = review_model.generate_content(prompt)
+            
+            # Parse review results with enhanced error handling
+            approved = False
+            review_notes = ""
+            missing_aspects = []
+            search_queries = []
+            current_section = None
+            improvement_suggestions = []
+            
+            if not response or not response.text:
+                raise ValueError("Empty response from review model")
+            
+            for line in response.text.split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    if line.startswith('APPROVED:'):
+                        approved = 'YES' in line.upper()
+                    elif line.startswith('SCORE:'):
+                        score = int(line.split(':')[1].strip().split('/')[0])
+                        # Auto-approve if score is very high
+                        if score >= 90:
+                            approved = True
+                    elif line.startswith('MISSING_ASPECTS:'):
+                        current_section = 'missing'
+                    elif line.startswith('SEARCH_QUERIES:'):
+                        current_section = 'queries'
+                    elif line.startswith('REVIEW:'):
+                        current_section = 'review'
+                    elif line.startswith('IMPROVEMENT_SUGGESTIONS:'):
+                        current_section = 'improvements'
+                    elif line and not line.startswith(('APPROVED:', 'SCORE:', 'SCORES_BREAKDOWN:', 'MISSING_ASPECTS:', 'SEARCH_QUERIES:', 'REVIEW:', 'IMPROVEMENT_SUGGESTIONS:')):
+                        if current_section == 'missing':
+                            if line.strip('- '):  # Only add non-empty lines
+                                missing_aspects.append(line.strip('- '))
+                        elif current_section == 'queries':
+                            if line.strip('- '):  # Only add non-empty lines
+                                search_queries.append(line.strip('- '))
+                        elif current_section == 'review':
+                            review_notes += line + '\n'
+                        elif current_section == 'improvements':
+                            if line.strip('- '):
+                                improvement_suggestions.append(line.strip('- '))
+                
+                except Exception as parse_error:
+                    self.logger.warning(f"Error parsing review line '{line}': {parse_error}")
+                    continue
+            
+            # Add improvement suggestions to review notes
+            if improvement_suggestions:
+                review_notes += "\n\nImprovement Suggestions:\n"
+                review_notes += "\n".join(f"- {suggestion}" for suggestion in improvement_suggestions)
+            
+            # Ensure we have some output
+            if not review_notes.strip():
+                review_notes = "Review completed but no specific notes were generated."
+            
+            # Log review results
+            self.logger.info(f"Report review completed - Approved: {approved}")
+            if not approved:
+                self.logger.info(f"Missing aspects: {len(missing_aspects)}")
+                self.logger.info(f"Additional queries: {len(search_queries)}")
+            
+            return approved, review_notes.strip(), missing_aspects, search_queries
+            
+        except Exception as e:
+            self.logger.error(f"Report review error: {e}")
+            # Return conservative default - not approved with error note
+            return False, f"Review failed due to error: {str(e)}", [], []
+
+    async def perform_research_cycle(self, search_queries: List[str], research_data: Dict) -> Dict:
+        """
+        Perform a complete research cycle: search, rank, analyze, and extract content.
+        Returns the iteration data with findings.
+        """
+        self.logger.info(f"Starting research cycle with {len(search_queries)} queries")
+        
+        # Perform batch web search
+        search_results = await self.batch_web_search(search_queries)
+        if not search_results:
+            self.logger.warning("No search results found")
+            return None
+            
+        # Rank the results
+        ranked_results = self.rank_new_results(research_data['main_query'], search_results)
+        if not ranked_results:
+            self.logger.warning("No valid ranked results")
+            return None
+            
+        # Process results and update research data
+        iteration_data = {
+            'queries_used': search_queries,
+            'findings': []
+        }
+        
+        # Identify URLs to scrape
+        urls_to_scrape = [r for r in ranked_results 
+                         if r['url'] not in self.scraped_urls 
+                         and r.get('scrape_decision', {}).get('should_scrape', False)][:10]
+        
+        if urls_to_scrape:
+            # Extract content from URLs
+            contents = await self.batch_extract_content(
+                [r['url'] for r in urls_to_scrape]
+            )
+            
+            for result in urls_to_scrape:
+                url = result['url']
+                content = contents.get(url, '')
+                if content:
+                    self.scraped_urls.add(url)
+                    finding = {
+                        'source': url,
+                        'content': content[:self.get_scrape_limit(
+                            result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                        )],
+                        'relevance_score': result.get('relevance_score', 0),
+                        'is_top_result': False,
+                        'scrape_level': result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
+                    }
+                    iteration_data['findings'].append(finding)
+                    research_data['final_sources'].append(finding)
+            
+            self.logger.info(f"Added {len(iteration_data['findings'])} findings from {len(urls_to_scrape)} URLs")
+        
+        return iteration_data
+
     async def research(self, query: str) -> str:
         """Main research function that coordinates the entire research process."""
         self.reset_state()
@@ -1226,29 +1447,25 @@ class DeepResearchAgent:
         research_data = {
             'main_query': query,
             'iterations': [],
-            'final_sources': []
+            'final_sources': [],
+            'report_versions': []  # Track different versions of the report
         }
         
         # Store the latest report structure
         latest_report_structure = ""
         
         while self.research_iterations < self.MAX_ITERATIONS:
-            # Combine iteration logs
-            self.logger.info(
-                f"Iteration {self.research_iterations + 1}: "
-                f"Processing {len(self.previous_queries)} queries"
-            )
-            
             # Get search queries for this iteration
             if self.research_iterations == 0:
                 # First iteration: generate initial queries
                 search_queries = self.generate_subqueries(query, research_data)
                 self.previous_queries.update(search_queries)
             else:
-                if not new_queries:
-                    self.logger.warning("No additional search queries provided")
+                # For subsequent iterations, we should already have new_queries defined
+                if not hasattr(self, '_current_queries') or not self._current_queries:
+                    self.logger.warning("No additional queries for this iteration")
                     break
-                search_queries = [q for q in new_queries if q not in self.previous_queries]
+                search_queries = [q for q in self._current_queries if q not in self.previous_queries]
                 if not search_queries:
                     self.logger.warning("No new unique queries to process")
                     break
@@ -1256,173 +1473,18 @@ class DeepResearchAgent:
             
             self.logger.info(f"Processing {len(search_queries)} queries for iteration {self.research_iterations + 1}")
             
-            # Parallel processing of search and content extraction
-            async def process_search_batch():
-                # Perform searches in parallel
-                search_results = await self.batch_web_search(search_queries)
-                if not search_results:
-                    return None, []
-                
-                # Rank results in parallel
-                ranked_results = self.rank_new_results(query, search_results)
-                
-                # Remove duplicates with parallel processing
-                seen_urls = set()
-                unique_ranked_results = []
-                
-                async def process_result(result):
-                    url = result['url']
-                    rewritten_url = self.rewrite_url(url)
-                    if rewritten_url not in seen_urls:
-                        seen_urls.add(rewritten_url)
-                        result['url'] = rewritten_url
-                        return result
-                    return None
-                
-                # Process results in parallel
-                tasks = [process_result(result) for result in ranked_results]
-                processed_results = await asyncio.gather(*tasks)
-                unique_ranked_results = [r for r in processed_results if r is not None]
-                
-                return unique_ranked_results, seen_urls
+            # Perform research cycle
+            iteration_data = await self.perform_research_cycle(search_queries, research_data)
+            if iteration_data:
+                research_data['iterations'].append(iteration_data)
             
-            # Execute search batch processing
-            unique_ranked_results, seen_urls = await process_search_batch()
-            if not unique_ranked_results:
-                self.logger.warning("No valid results found in this iteration")
+            self.research_iterations += 1
+            
+            if self.research_iterations >= self.MAX_ITERATIONS:
                 break
             
-            # Prepare URLs for scraping with parallel processing
-            url_to_result = {}
-            
-            async def process_scraping_candidate(result):
-                url = result['url']
-                if (url not in self.scraped_urls and 
-                    result.get('scrape_decision', {}).get('should_scrape', False)):
-                    return url, result
-                return None
-            
-            # Process scraping candidates in parallel
-            tasks = [
-                process_scraping_candidate(result) 
-                for result in list(self.all_results.values()) + unique_ranked_results
-            ]
-            scraping_candidates = await asyncio.gather(*tasks)
-            
-            # Fix the dictionary comprehension to properly handle the tuple results
-            url_to_result = {}
-            for item in scraping_candidates:
-                if item:  # If we got a valid result
-                    url, result = item  # Unpack the tuple
-                    if url not in url_to_result or result.get('relevance_score', 0) > url_to_result[url].get('relevance_score', 0):
-                        url_to_result[url] = result
-            
-            # Convert to list and sort by relevance score
-            urls_to_scrape = sorted(
-                url_to_result.values(),
-                key=lambda x: x.get('relevance_score', 0),
-                reverse=True
-            )[:15]  # Take top 15
-            
-            iteration_data = {
-                'queries_used': search_queries,
-                'findings': []
-            }
-            
-            if urls_to_scrape:
-                # Simplify URL scraping logs
-                top_url = urls_to_scrape[0].get('url')
-                self.logger.info(
-                    f"Scraping {len(urls_to_scrape)} URLs "
-                    f"(Top URL: {top_url[:60]}{'...' if len(top_url) > 60 else ''})"
-                )
-                
-                # Create a set of unique URLs to scrape
-                urls_to_extract = {r['url'] for r in urls_to_scrape}
-                
-                # Parallel content extraction
-                contents = await self.batch_extract_content(list(urls_to_extract))
-                
-                # Process extracted content in parallel
-                async def process_content(result):
-                    url = result['url']
-                    content = contents.get(url, '')
-                    if not content:
-                        return None
-                        
-                    self.scraped_urls.add(url)
-                    rewritten_url = self.rewrite_url(url)
-                    
-                    # Remove individual content storage logs
-                    if url == top_url:
-                        content_to_store = content[:10000]
-                    else:
-                        scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
-                        char_limit = self.get_scrape_limit(scrape_level)
-                        content_to_store = content[:char_limit]
-                    
-                    finding = {
-                        'source': rewritten_url,
-                        'content': content_to_store,
-                        'relevance_score': result.get('relevance_score', 0),
-                        'is_top_result': url == top_url,
-                        'scrape_level': result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
-                    }
-                    
-                    # Update all_results
-                    result['url'] = rewritten_url
-                    self.all_results[rewritten_url] = result
-                    
-                    return finding
-                
-                # Process content in parallel
-                content_tasks = [process_content(result) for result in urls_to_scrape]
-                findings = await asyncio.gather(*content_tasks)
-                
-                # Filter out None values and add to iteration data
-                valid_findings = [f for f in findings if f is not None]
-                iteration_data['findings'].extend(valid_findings)
-                research_data['final_sources'].extend(valid_findings)
-            
-            research_data['iterations'].append(iteration_data)
-            
-            # Create comprehensive analysis context
-            analysis_context = {
-                'main_query': query,
-                'current_iteration': self.research_iterations,
-                'previous_queries': list(self.previous_queries),
-                'high_ranking_urls': self.high_ranking_urls,
-                'current_findings': iteration_data['findings'],
-                'all_iterations': research_data['iterations'],
-                'total_sources': len(research_data['final_sources']),
-                'unscraped_urls': [
-                    {'url': url, 'score': data.get('relevance_score', 0)}
-                    for url, data in self.all_results.items()
-                    if url not in self.scraped_urls
-                ]
-            }
-            
-            # Analyze research state
-            need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(
-                query, analysis_context
-            )
-            
-            if report_structure:
-                latest_report_structure = report_structure
-                self.logger.info("Updated report structure based on latest analysis")
-            
-            if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
-                self.logger.info(f"Continuing research - Iteration {self.research_iterations + 1}")
-                self.research_iterations += 1
-                continue
-            else:
-                self.logger.info(
-                    "Research complete: " + 
-                    ("sufficient information gathered" if not need_more_research else "maximum iterations reached")
-                )
-                # Add new log message for report generation decision
-                self.logger.info("Moving to final report generation phase...")
-                break
+            # Clear current queries after processing
+            self._current_queries = []
         
         if not research_data['final_sources']:
             self.logger.warning("No sources were successfully scraped - continuing with limited information")
@@ -1439,9 +1501,9 @@ class DeepResearchAgent:
                 'findings': research_data['final_sources']
             })
 
-        # Generate and save streaming report
-        self.logger.info("Generating final report with streaming...")
-        report_generator, sources_used = await self.generate_report(
+        # Generate initial report
+        self.logger.info("Generating initial report...")
+        initial_report_text, initial_sources_used = await self.generate_report(
             query, research_data, latest_report_structure or """
             # Research Report: {query}
             
@@ -1459,13 +1521,113 @@ class DeepResearchAgent:
             """
         )
         
-        if report_generator:
-            report_file = self.save_report_streaming(
-                query, report_generator, sources_used
+        if initial_report_text:
+            # Store initial report version
+            research_data['report_versions'].append({
+                'version': 'initial',
+                'report_text': initial_report_text,
+                'sources_used': initial_sources_used
+            })
+            
+            # Review the report
+            self.logger.info("Reviewing report quality...")
+            approved, review_notes, missing_aspects, additional_queries = await self.review_report(
+                query, initial_report_text, research_data
             )
-            if report_file:
-                self.logger.info(f"Report has been generated and saved to: {report_file}")
-                return f"Report has been generated and saved to: {report_file}"
+            
+            # Store review information
+            research_data['review_data'] = {
+                'approved': approved,
+                'review_notes': review_notes,
+                'missing_aspects': missing_aspects,
+                'suggested_queries': additional_queries
+            }
+            
+            # If not approved and we haven't hit max iterations, do one more research cycle
+            if not approved and self.research_iterations < self.MAX_ITERATIONS:
+                self.logger.info(f"Report review indicated improvements needed:\n{review_notes}")
+                
+                if missing_aspects and additional_queries:
+                    self.logger.info(f"Missing aspects identified: {', '.join(missing_aspects)}")
+                    self.research_iterations += 1
+                    
+                    # Add new queries to previous_queries
+                    if additional_queries:
+                        self.logger.info(f"Adding {len(additional_queries)} new search queries")
+                        
+                        # Store queries for next iteration
+                        self._current_queries = additional_queries
+                        
+                        # Perform additional research cycle with new queries
+                        new_iteration_data = await self.perform_research_cycle(
+                            additional_queries, 
+                            research_data
+                        )
+                        
+                        if new_iteration_data:
+                            research_data['iterations'].append(new_iteration_data)
+                
+                # Generate final report with improved content, including context from initial report and review
+                self.logger.info("Generating improved report with additional research...")
+                final_report_text, final_sources_used = await self.generate_report(
+                    query,
+                    {
+                        **research_data,
+                        'initial_report': initial_report_text,
+                        'review_feedback': {
+                            'notes': review_notes,
+                            'missing_aspects': missing_aspects
+                        }
+                    },
+                    latest_report_structure + """
+                    
+                    ## Previous Research Context
+                    This section addresses gaps identified in the initial research:
+                    
+                    ### Initial Findings
+                    Summary of initial research findings
+                    
+                    ### Identified Gaps
+                    List of gaps identified in the review
+                    
+                    ### Additional Research
+                    New findings from follow-up research
+                    
+                    ### Synthesis
+                    Integration of initial and new findings
+                    """
+                )
+                
+                if final_report_text:
+                    # Store final report version
+                    research_data['report_versions'].append({
+                        'version': 'final',
+                        'report_text': final_report_text,
+                        'sources_used': final_sources_used
+                    })
+                    report_text = final_report_text
+                    sources_used = final_sources_used
+                else:
+                    # Fallback to initial report if final generation fails
+                    self.logger.warning("Failed to generate improved report, using initial version")
+                    report_text = initial_report_text
+                    sources_used = initial_sources_used
+            else:
+                if approved:
+                    self.logger.info("Initial report approved by review process")
+                else:
+                    self.logger.info("Max iterations reached, proceeding with initial report")
+                report_text = initial_report_text
+                sources_used = initial_sources_used
+            
+            # Save the final report
+            if report_text:
+                report_file = self.save_report_streaming(
+                    query, report_text, sources_used
+                )
+                if report_file:
+                    self.logger.info(f"Report has been generated and saved to: {report_file}")
+                    return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
 
