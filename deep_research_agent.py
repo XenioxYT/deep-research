@@ -64,7 +64,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-pro-exp-02-05',
+            'gemini-2.0-flash-exp',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
