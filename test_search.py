@@ -23,17 +23,15 @@ class MockSearchEngine:
     def __init__(self):
         pass
         
-    def list(self, q: str, cx: str, num: int = 12) -> 'MockSearchResponse':
+    def list(self, q: str, cx: str, num: int = 8) -> 'MockSearchResponse':
         """Mimic CSE list method"""
         try:
-            # Get raw results and handle empty case
-            raw_results = list(search(q, advanced=True, num_results=num, safe="none"))
-            if not raw_results:
-                return MockSearchResponse([])
-            
-            # Convert raw results to our SearchResult objects with safer property access
+            # Use a generator to safely get results
+            results_generator = search(q, advanced=True, num_results=num, safe="none")
             results = []
-            for result in raw_results:
+            
+            # Safely iterate through generator
+            for result in results_generator:
                 try:
                     # Safely get properties with fallbacks
                     url = getattr(result, 'url', None)
@@ -49,6 +47,11 @@ class MockSearchEngine:
                         description=description if description else ''  # Empty string if no description
                     )
                     results.append(search_result)
+                    
+                    # Break if we have enough results
+                    if len(results) >= num:
+                        break
+                        
                 except Exception as e:
                     print(f"Error processing search result: {e}")
                     continue
@@ -62,7 +65,7 @@ class MockSearchEngine:
             return MockSearchResponse(items)
             
         except Exception as e:
-            print(f"Search error: {e}")
+            print(f"Search error: {str(e)}")
             return MockSearchResponse([])  # Return empty response on error
 
 class MockSearchResponse:

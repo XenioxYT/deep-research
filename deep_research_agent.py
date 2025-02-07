@@ -64,7 +64,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-pro-exp-02-05',
+            'gemini-2.0-flash-exp',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
@@ -82,7 +82,7 @@ class DeepResearchAgent:
         self.blacklisted_urls = set()
         self.scraped_urls = set()  # Track already scraped URLs
         self.research_iterations = 0
-        self.MAX_ITERATIONS = 3
+        self.MAX_ITERATIONS = 9
         self.system_context = system_context
         self.total_tokens = 0  # Track total tokens used
         
@@ -239,6 +239,8 @@ class DeepResearchAgent:
 
     def generate_subqueries(self, main_query: str, research_state: Optional[Dict] = None) -> List[str]:
         """Generate sub-queries using AI to explore different aspects of the main query."""
+        self.logger.info("Analyzing query and generating search queries...")
+        
         context = ""
         if research_state and self.previous_queries:
             context = f"""
@@ -268,15 +270,11 @@ class DeepResearchAgent:
         - Keep each query under 5-6 words
         - Keep queries open ended, not too specific]"""
 
-        self.logger.info("Analyzing query and generating search queries...")
-        
         try:
             response = self.model.generate_content(prompt)
             if not response or not response.text:
                 self.logger.error("Empty response from AI model")
                 return [main_query]
-            
-            self.logger.debug(f"AI Response:\n{response.text}")
             
             # Parse response
             response_text = response.text.strip()
@@ -331,7 +329,7 @@ class DeepResearchAgent:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
 
-    async def batch_web_search(self, queries: List[str], num_results: int = 12) -> List[Dict]:
+    async def batch_web_search(self, queries: List[str], num_results: int = 8) -> List[Dict]:
         """Perform multiple web searches in parallel with increased batch size."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
@@ -530,7 +528,7 @@ class DeepResearchAgent:
 
     async def batch_extract_content(self, urls: List[str], max_concurrent: int = 8) -> Dict[str, str]:
         """Extract content from multiple URLs in parallel with enhanced concurrency."""
-        self.logger.info(f"Batch extracting content from {len(urls)} URLs...")
+        self.logger.info(f"Extracting content from {len(urls)} URLs")
         
         # Create semaphore for concurrency control
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -558,7 +556,7 @@ class DeepResearchAgent:
                     
                     # Configure page timeouts
                     page.set_default_navigation_timeout(20000)
-                    page.set_default_timeout(15000)
+                    page.set_default_timeout(5000)
                     
                     # Try to load the page with retry logic
                     content = ""
@@ -571,7 +569,7 @@ class DeepResearchAgent:
                             response = await page.goto(
                                 url,
                                 wait_until='domcontentloaded',
-                                timeout=15000
+                                timeout=5000
                             )
                             
                             if not response or not response.ok:
@@ -698,9 +696,9 @@ class DeepResearchAgent:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
         3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
-           - LOW: 3000 chars - For basic/overview content
-           - MEDIUM: 6000 chars - For moderate detail (default)
-           - HIGH: 12000 chars - For in-depth analysis
+           - LOW: 1500 chars - For basic/overview content (default)
+           - MEDIUM: 3000 chars - For moderate detail
+           - HIGH: 8000 chars - For in-depth analysis
         
         Consider these factors:
         - Content depth and relevance to query
@@ -727,7 +725,6 @@ class DeepResearchAgent:
 
         try:
             response = self.ranking_model.generate_content(prompt)
-            self.logger.debug(f"Ranking response:\n{response.text}")
             
             # Parse rankings and verify uniqueness
             rankings = {}
@@ -747,14 +744,14 @@ class DeepResearchAgent:
                     rankings[url] = score
                     
                     # Only mark for scraping if we haven't hit our limit
-                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 20
+                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 10
                     if should_scrape:
                         scrape_count += 1
                     
                     # Validate and normalize scraping level
                     scrape_level = scrape_level.upper()
                     if scrape_level not in ['LOW', 'MEDIUM', 'HIGH']:
-                        scrape_level = 'MEDIUM'  # Default to medium if invalid
+                        scrape_level = 'LOW'  # Default to LOW if invalid
                     
                     scrape_decisions[url] = {
                         'should_scrape': should_scrape,
@@ -787,21 +784,13 @@ class DeepResearchAgent:
             
             ranked_results.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
             
-            # Log all ranked URLs with their decisions
-            self.logger.info(f"\nAll {len(ranked_results)} ranked URLs:")
-            for r in ranked_results:
-                decision = r['scrape_decision']
-                self.logger.info(
-                    f"{r['url']} (Score: {r.get('relevance_score', 0):.3f}, "
-                    f"Scrape: {decision['should_scrape']} "
-                    f"(Original: {decision['original_decision']}, Level: {decision['scrape_level']})"
-                )
-            
-            # Log summary of scraping decisions
-            self.logger.info(f"\nScraping summary:")
-            self.logger.info(f"Total URLs ranked: {len(ranked_results)}")
-            self.logger.info(f"URLs marked for scraping: {scrape_count}")
-            self.logger.info(f"High-ranking URLs (score > 0.6): {len(self.high_ranking_urls)}")
+            # Log summary instead of all URLs
+            self.logger.info(
+                f"Ranking summary:\n"
+                f"Total URLs: {len(ranked_results)}\n"
+                f"URLs marked for scraping: {scrape_count}\n"
+                f"High-ranking URLs (score > 0.6): {len(self.high_ranking_urls)}"
+            )
             
             return ranked_results
         except Exception as e:
@@ -815,7 +804,7 @@ class DeepResearchAgent:
             'MEDIUM': 3000,
             'HIGH': 8000
         }
-        return limits.get(scrape_level.upper(), 3000)  # Default to MEDIUM if invalid
+        return limits.get(scrape_level.upper(), 1500)  # Default to LOW if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -833,47 +822,6 @@ class DeepResearchAgent:
         
         return ranked_results
 
-    def extract_content(self, url: str) -> str:
-        """Extract main content from a webpage using Playwright."""
-        self.logger.info(f"Extracting content: {url}")
-        try:
-            page = self.context.new_page()
-            page.goto(url, wait_until='networkidle', timeout=20000)
-            
-            # Wait for content to load
-            page.wait_for_selector('body', timeout=5000)
-            
-            # Remove unwanted elements
-            page.evaluate("""() => {
-                const selectors = ['script', 'style', 'nav', 'header', 'footer', 'iframe', 'aside', 'form'];
-                selectors.forEach(selector => {
-                    document.querySelectorAll(selector).forEach(el => el.remove());
-                });
-            }""")
-            
-            # Extract text from main content elements
-            content = page.evaluate("""() => {
-                const contentElements = document.querySelectorAll('article, main, .content, .post, p, h1, h2, h3, h4, h5, h6');
-                const textContent = [];
-                
-                contentElements.forEach(elem => {
-                    const text = elem.textContent.trim();
-                    if (text.length >= 50 && elem.querySelectorAll('a').length < 5) {
-                        textContent.push(text);
-                    }
-                });
-                
-                return textContent.join(' ');
-            }""")
-            
-            page.close()
-            
-            self.logger.info(f"Extracted {len(content)} characters")
-            return content
-        except Exception as e:
-            self.logger.error(f"Extraction error: {e}")
-            return ""
-
     def analyze_research_state(self, main_query: str, current_data: Dict) -> Tuple[bool, str, List[str], str]:
         """Analyze current research state and decide if more research is needed."""
         self.logger.info("Analyzing research state...")
@@ -881,11 +829,15 @@ class DeepResearchAgent:
         prompt = f"""{self.system_context}
         Analyze the research on: '{main_query}'
         Current data: {json.dumps(current_data, indent=2)}
+        Current iteration: {self.research_iterations}
         
         IMPORTANT DECISION GUIDELINES:
         1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately and mark as SIMPLE
         2. For queries that can be fully answered with current findings, say NO
-        3. For queries needing more depth/verification, say YES and specify what's missing
+        3. For queries needing more depth/verification:
+           - On iteration 0-1: Say YES if significant information is missing
+           - On iteration 2: Only say YES if crucial information is missing
+           - On iteration 3+: Strongly lean towards NO unless absolutely critical information is missing
         4. Consider the query ANSWERED when you have:
            - Sufficient high-quality sources (relevance_score > 0.6)
            - Enough information to provide a comprehensive answer
@@ -900,15 +852,15 @@ class DeepResearchAgent:
            - Duplicate or redundant information
            - Low quality or unreliable sources
         4. Only continue research if genuinely valuable information is missing
-        5. Generate a custom report structure based on the query type and findings
+        5. Generate a custom report structure based on the query type and findings. If the query is simple, the report should be a simple answer to the query. If the query is complex, the report should be a comprehensive report with all the information needed to answer the query.
         6. Mark any unscraped URLs that should be scraped in the next iteration
         
         Format response EXACTLY as follows:
         DECISION: [YES (continue research)/NO (produce final report)]
         TYPE: [SIMPLE/COMPLEX]
-        REASON: [One clear sentence explaining the decision]
+        REASON: [One clear sentence explaining the decision, mentioning iteration number if relevant]
         REMOVE_URLS: [List URLs to remove from context, one per line, with brief reason after # symbol]
-        BLACKLIST: [List URLs to blacklist, one per line]
+        BLACKLIST: [List URLs to blacklist, one per line. These URLs will be ignored in future iterations.]
         MISSING: [List missing information aspects, one per line]
         SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
         SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
@@ -916,12 +868,12 @@ class DeepResearchAgent:
         1. Required sections and their order
         2. What to include in each section
         3. Specific formatting guidelines
-        4. Any special considerations for this topic
+        4. Try to include a table or information where relevant
+        5. Any special considerations for this topic
         The structure should be tailored to the specific query type (e.g., product analysis, historical research, current events, etc.)]"""
         
         try:
-            response = self.analysis_model.generate_content(prompt)  # Use analysis specific model
-            self.logger.debug(f"Analysis response:\n{response.text}")
+            response = self.analysis_model.generate_content(prompt)
             
             # Parse sections
             decision = False
@@ -930,8 +882,8 @@ class DeepResearchAgent:
             missing = []
             search_queries = []
             report_structure = ""
-            urls_to_scrape_next = {}  # New dict to store URLs and their scrape levels
-            urls_to_remove = {}  # New dict to store URLs to remove and their reasons
+            urls_to_scrape_next = {}
+            urls_to_remove = {}
             current_section = None
             
             for line in response.text.split('\n'):
@@ -1024,16 +976,18 @@ class DeepResearchAgent:
                     }
                     self.logger.info(f"Marked {url} for {level} scraping in next iteration")
             
-            # Prepare explanation
+            # Log missing information if any
+            if missing:
+                self.logger.info("Missing information:\n- " + "\n- ".join(missing))
+            
+            # Prepare explanation (simplified)
             explanation = f"Query type: {query_type}. " + explanation
             if urls_to_remove:
-                explanation += "\n\nRemoved URLs:\n" + "\n".join(f"- {url} (Reason: {reason})" for url, reason in urls_to_remove.items())
-            if missing:
-                explanation += "\n\nMissing Information:\n" + "\n".join(f"- {m}" for m in missing)
+                explanation += f"\nRemoved {len(urls_to_remove)} URLs"
             if search_queries:
-                explanation += "\n\nSearch Queries to Try:\n" + "\n".join(f"- {q}" for q in search_queries)
+                explanation += f"\nGenerated {len(search_queries)} new search queries"
             if urls_to_scrape_next:
-                explanation += "\n\nURLs Marked for Next Scraping:\n" + "\n".join(f"- {url} ({level})" for url, level in urls_to_scrape_next.items())
+                explanation += f"\nMarked {len(urls_to_scrape_next)} URLs for next scraping"
             
             # For simple queries, ensure we have a report structure
             if query_type == "SIMPLE" and not report_structure:
@@ -1055,28 +1009,38 @@ class DeepResearchAgent:
             self.logger.error(f"Analysis error: {e}")
             return False, str(e), [], ""
 
-    def save_report(self, query: str, report: str):
+    def save_report_streaming(self, query: str, report_text, sources_used: str):
         """Save the report to a markdown file."""
         try:
             # Create reports directory if it doesn't exist
             os.makedirs('reports', exist_ok=True)
             
-            # Clean query for filename
-            clean_query = re.sub(r'[^\w\s-]', '', query).strip().lower()
-            clean_query = re.sub(r'[-\s]+', '-', clean_query)
+            # Clean and truncate query for filename
+            clean_query = self.clean_filename(query)
             
             # Create filename with date
             filename = f"reports/{clean_query}-{self.current_date}.md"
             
-            # Add metadata to report
-            full_report = f"{report}"
-            
+            # Write the report content
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write(full_report)
+                try:
+                    # Write the report text
+                    if report_text:
+                        f.write(report_text)
+                        self.log_token_usage(report_text, "Report content")
+                    
+                    # Add the sources section at the end
+                    f.write("\n\n")  # Add some spacing
+                    f.write(sources_used)
+                except Exception as e:
+                    self.logger.error(f"Error writing report: {e}")
+                    raise  # Re-raise to be caught by outer try-except
             
             self.logger.info(f"Report saved to {filename}")
+            return filename
         except Exception as e:
             self.logger.error(f"Error saving report: {e}")
+            return None
 
     def count_tokens(self, text: str) -> int:
         """Count tokens accurately using Gemini's token counter."""
@@ -1098,14 +1062,7 @@ class DeepResearchAgent:
             tokens = self.count_tokens(text)
             self.total_tokens += tokens
             self.token_usage_by_operation[operation] += tokens
-            
-            # Log detailed usage including content tokens
-            self.logger.info(
-                f"Token usage for {operation}: {tokens:,} tokens\n"
-                f"Operation total: {self.token_usage_by_operation[operation]:,}\n"
-                f"Content tokens: {self.content_tokens:,}\n"
-                f"Grand total (including content): {self.total_tokens + self.content_tokens:,}"
-            )
+
         except Exception as e:
             self.logger.error(f"Error logging token usage: {e}")
 
@@ -1132,54 +1089,12 @@ class DeepResearchAgent:
         if len(clean_query) > max_length:
             clean_query = clean_query[:max_length].rsplit('-', 1)[0]
         
-        return clean_query
-
-    def save_report_streaming(self, query: str, report_generator, sources_used: str):
-        """Save the report to a markdown file in a streaming fashion."""
-        try:
-            # Create reports directory if it doesn't exist
-            os.makedirs('reports', exist_ok=True)
-            
-            # Clean and truncate query for filename
-            clean_query = self.clean_filename(query)
-            
-            # Create filename with date
-            filename = f"reports/{clean_query}-{self.current_date}.md"
-            
-            # Write header first
-            header = f"""# Research Report: {query}
-Date: {self.current_date}
-Location: {self.approximate_location}
-
-"""
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(header)
-            
-            # Stream the report content
-            with open(filename, 'a', encoding='utf-8') as f:
-                try:
-                    for chunk in report_generator:
-                        if chunk and chunk.text:  # Check both chunk and text exist
-                            clean_text = chunk.text.encode('ascii', 'ignore').decode()  # Remove non-ASCII chars
-                            f.write(clean_text)
-                            f.flush()  # Ensure content is written immediately
-                            # Log progress
-                            self.log_token_usage(clean_text, "Report streaming chunk")
-                except Exception as e:
-                    self.logger.error(f"Error during streaming: {e}")
-                
-                # Add the sources section at the end
-                f.write(sources_used)
-                f.flush()
-            
-            self.logger.info(f"Report saved to {filename}")
-            return filename
-        except Exception as e:
-            self.logger.error(f"Error saving streaming report: {e}")
-            return None
+        # Add current time to the filename
+        current_time = datetime.now().strftime("%H-%M-%S")
+        return f"{clean_query}-{current_time}"
 
     async def generate_report(self, main_query: str, research_data: Dict, report_structure: str) -> Tuple[str, str]:
-        """Generate a comprehensive report from the gathered research data with streaming output."""
+        """Generate a comprehensive report from the gathered research data."""
         max_retries = 3
         base_delay = 2  # Base delay in seconds
         
@@ -1253,72 +1168,60 @@ Location: {self.approximate_location}
                 The report should be long and detailed, and should include all the information from the sources used.
                 Contradictions in sources should be noted and explained, and the report should provide a conclusion that takes into account the contradictions.
                 
-                Text Formatting Rules:
-                - Use straight quotes (") instead of curly quotes (" ")
-                - Use straight apostrophes (') instead of curly ones (')
-                - Use simple dashes (-) instead of em-dashes (—)
-                - Use standard ellipsis (...) instead of special characters (…)
-                - Avoid ALL special Unicode characters
-                - Write numbers in plain ASCII (1,234.56)
-                - Always put titles in #, headings in ## and subheadings in ###
-                - Use bold text for emphasis to highlight key points.
+                Markdown Formatting Guidelines:
+                - Use section headers with #, ##, and ###
+                - Use **bold** for emphasis on key points
+                - Format numbers naturally with proper thousands separators
+                - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
+                - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate. Be sure to mention when and where you have used your own knowledge!
+                - You can use LATEX formatting. ALWAYS wrap mathematical equations in $$.
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
                 
                 DO NOT include a sources section - it will be added automatically."""
                 
-                # Generate streaming response with proper safety settings
-                safety_settings = {
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                }
-                
+                # Generate response
                 response = self.report_model.generate_content(
                     prompt,
-                    stream=True,  # Enable streaming
                     generation_config={
-                        'temperature': 0.7,  # Slightly increase creativity
-                        'top_p': 0.9,  # More diverse output
-                        'max_output_tokens': 8192,  # Increased for longer reports
+                        'temperature': 0.7,
+                        'top_p': 0.9,
+                        'max_output_tokens': 8192,
                     },
-                    safety_settings=safety_settings
+                    safety_settings=self.safety_settings
                 )
                 
-                self.logger.info("Starting report generation stream")
-                return response, sources_used
+                # Check for prompt feedback and blocking
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
+                    if any(feedback.block_reason for feedback in response.prompt_feedback):
+                        raise ValueError(f"Prompt blocked: {response.prompt_feedback}")
+                
+                # Verify we have a valid response
+                if not response or not response.text:
+                    raise ValueError("Invalid response from model")
+                
+                self.logger.info("Report generation completed")
+                return response.text, sources_used
                 
             except Exception as e:
-                delay = base_delay * (2 ** attempt)  # Exponential backoff
+                delay = base_delay * (2 ** attempt)
                 if attempt < max_retries - 1:
-                    error_msg = str(e)
                     self.logger.warning(
-                        f"Report generation attempt {attempt + 1} failed: {error_msg}\n"
+                        f"Report generation attempt {attempt + 1} failed: {str(e)}\n"
                         f"Retrying in {delay} seconds..."
                     )
                     await asyncio.sleep(delay)
-                    
-                    # If it's a specific error that might benefit from a smaller context, try reducing content
-                    if "500" in error_msg:
-                        # Reduce content size for next attempt
-                        for url in high_ranking_sources:
-                            if high_ranking_sources[url].get('content'):
-                                high_ranking_sources[url]['content'] = high_ranking_sources[url]['content'][:3000]
-                        self.logger.info("Reduced content size for next attempt")
                 else:
-                    self.logger.error(f"All report generation attempts failed: {e}")
+                    self.logger.error(f"All report generation attempts failed: {str(e)}")
                     return None, ""
         
         return None, ""
 
     async def research(self, query: str) -> str:
-        """Main research function that coordinates the entire research process with enhanced parallelization."""
-        # Reset state for new query
+        """Main research function that coordinates the entire research process."""
         self.reset_state()
-        
-        self.logger.info(f"Starting research on: {query}")
+        self.logger.info(f"Starting research: {query}")
         
         research_data = {
             'main_query': query,
@@ -1330,7 +1233,11 @@ Location: {self.approximate_location}
         latest_report_structure = ""
         
         while self.research_iterations < self.MAX_ITERATIONS:
-            self.logger.info(f"Starting research iteration {self.research_iterations + 1}")
+            # Combine iteration logs
+            self.logger.info(
+                f"Iteration {self.research_iterations + 1}: "
+                f"Processing {len(self.previous_queries)} queries"
+            )
             
             # Get search queries for this iteration
             if self.research_iterations == 0:
@@ -1423,9 +1330,12 @@ Location: {self.approximate_location}
             }
             
             if urls_to_scrape:
-                # Get the top URL for full scraping
+                # Simplify URL scraping logs
                 top_url = urls_to_scrape[0].get('url')
-                self.logger.info(f"Top URL selected for full scraping: {top_url}")
+                self.logger.info(
+                    f"Scraping {len(urls_to_scrape)} URLs "
+                    f"(Top URL: {top_url[:60]}{'...' if len(top_url) > 60 else ''})"
+                )
                 
                 # Create a set of unique URLs to scrape
                 urls_to_extract = {r['url'] for r in urls_to_scrape}
@@ -1443,15 +1353,13 @@ Location: {self.approximate_location}
                     self.scraped_urls.add(url)
                     rewritten_url = self.rewrite_url(url)
                     
-                    # Determine content length based on URL priority
+                    # Remove individual content storage logs
                     if url == top_url:
-                        content_to_store = content
-                        self.logger.info(f"Storing full content ({len(content)} chars) for top URL: {url}")
+                        content_to_store = content[:10000]
                     else:
                         scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
                         char_limit = self.get_scrape_limit(scrape_level)
                         content_to_store = content[:char_limit]
-                        self.logger.info(f"Storing {scrape_level} content ({len(content_to_store)} chars) for URL: {url}")
                     
                     finding = {
                         'source': rewritten_url,
@@ -1498,44 +1406,57 @@ Location: {self.approximate_location}
             need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(
                 query, analysis_context
             )
-            self.log_token_usage(explanation, "Research state analysis")
             
             if report_structure:
                 latest_report_structure = report_structure
                 self.logger.info("Updated report structure based on latest analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
-                self.logger.info(f"More research needed:\n{explanation}")
+                self.logger.info(f"Continuing research - Iteration {self.research_iterations + 1}")
                 self.research_iterations += 1
                 continue
             else:
-                if not need_more_research:
-                    self.logger.info("Research complete - sufficient information gathered")
-                else:
-                    self.logger.warning("Maximum iterations reached")
+                self.logger.info(
+                    "Research complete: " + 
+                    ("sufficient information gathered" if not need_more_research else "maximum iterations reached")
+                )
+                # Add new log message for report generation decision
+                self.logger.info("Moving to final report generation phase...")
                 break
         
         if not research_data['final_sources']:
-            if latest_report_structure and "simple" in explanation.lower():
-                self.logger.info("Simple query detected - generating report without sources")
-                report_generator, sources_used = await self.generate_report(
-                    query, research_data, latest_report_structure
-                )
-                
-                if report_generator:
-                    report_file = self.save_report_streaming(
-                        query, report_generator, sources_used
-                    )
-                    if report_file:
-                        self.logger.info(f"Report saved to: {report_file}")
-                        return f"Report has been generated and saved to: {report_file}"
-            
-            return "Error: No valid information could be gathered. Please try again or modify the query."
-        
+            self.logger.warning("No sources were successfully scraped - continuing with limited information")
+            # Add a placeholder finding to ensure research data isn't empty
+            research_data['final_sources'].append({
+                'source': 'No sources available',
+                'content': 'No content could be successfully retrieved.',
+                'relevance_score': 0,
+                'is_top_result': False,
+                'scrape_level': 'LOW'
+            })
+            research_data['iterations'].append({
+                'queries_used': list(self.previous_queries),
+                'findings': research_data['final_sources']
+            })
+
         # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
         report_generator, sources_used = await self.generate_report(
-            query, research_data, latest_report_structure
+            query, research_data, latest_report_structure or """
+            # Research Report: {query}
+            
+            ## Summary
+            Present the main findings or lack thereof.
+            
+            ## Available Information
+            Detail any information found, even if limited.
+            
+            ## Limitations
+            Explain why information might be limited or unavailable.
+            
+            ## Recommendations
+            Suggest alternative approaches or queries if needed.
+            """
         )
         
         if report_generator:
@@ -1543,22 +1464,10 @@ Location: {self.approximate_location}
                 query, report_generator, sources_used
             )
             if report_file:
-                self.logger.info(f"Report saved to: {report_file}")
+                self.logger.info(f"Report has been generated and saved to: {report_file}")
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
-
-    def store_content(self, url: str, content: str, content_type: str = "FULL"):
-        """Store content with token counting."""
-        try:
-            # Count tokens before truncation
-            tokens = self.count_tokens(content)
-            self.content_tokens += tokens
-            self.logger.info(f"Content tokens for {url}: {tokens:,} (Total content tokens: {self.content_tokens:,})")
-            
-            # ... existing storage logic ...
-        except Exception as e:
-            self.logger.error(f"Error storing content: {e}")
 
 def main():
     """Run the research agent with proper async handling."""
