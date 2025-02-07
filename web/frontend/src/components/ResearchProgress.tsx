@@ -1,4 +1,4 @@
-import { Paper, Box, Typography, Fade, Collapse, IconButton, Skeleton } from '@mui/material';
+import { Paper, Box, Typography, Fade, Collapse, IconButton } from '@mui/material';
 import { useEffect, useRef, useState, useMemo } from 'react';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { styled, keyframes, Theme, useTheme } from '@mui/material/styles';
@@ -14,13 +14,13 @@ interface ResearchProgressProps {
   visible: boolean;
 }
 
+type GroupType = 'search' | 'analysis' | 'extraction' | 'report' | 'other';
+
 interface LogGroup {
   title: string;
   logs: Log[];
-  type: 'search' | 'analysis' | 'extraction' | 'report' | 'other';
+  type: GroupType;
 }
-
-type GroupType = LogGroup['type'];
 
 const shimmer = keyframes`
   0% {
@@ -47,12 +47,6 @@ const glow = keyframes`
     box-shadow: 0 0 10px rgba(187, 134, 252, 0.125);
   }
 `;
-
-const LoadingBox = styled(Box)(({ theme }) => ({
-  animation: `${shimmer} 2s infinite linear`,
-  background: `linear-gradient(to right, ${theme.palette.background.paper} 8%, ${theme.palette.action.hover} 18%, ${theme.palette.background.paper} 33%)`,
-  backgroundSize: '2000px 100%',
-}));
 
 const ExpandMore = styled((props: {
   expand: boolean;
@@ -169,20 +163,23 @@ const getGroupTitle = (message: string): string => {
   return 'Other Operations';
 };
 
+interface MessageGroup {
+  type: 'extraction' | 'other';
+  title: string;
+  messages: string[];
+}
+
 const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
   const theme = useTheme();
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(new Set());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const lastUserScrollPosition = useRef<number>(0);
-  const lastContentHeight = useRef<number>(0);
-  const isAutoExpanding = useRef(false);
-  const expandTimeoutRef = useRef<ReturnType<typeof setTimeout>>(setTimeout(() => {}, 0));
   const lastLogsLength = useRef<number>(0);
   const extractionStartTime = useRef<number | null>(null);
   const [extractionDuration, setExtractionDuration] = useState<number>(0);
   const [showWritingReport, setShowWritingReport] = useState(false);
-  const extractionTimerRef = useRef<ReturnType<typeof setInterval>>();
+  const extractionTimerRef = useRef<ReturnType<typeof setInterval>>(null);
+  const [messageGroups, setMessageGroups] = useState<MessageGroup[]>([]);
 
   // Track extraction time
   useEffect((): (() => void) => {
@@ -236,7 +233,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
     const groups: LogGroup[] = [];
     let currentGroup: LogGroup | null = null;
 
-    const shouldStartNewGroup = (message: string, currentType?: GroupType): boolean => {
+    const shouldStartNewGroup = (message: string): boolean => {
       const lowerMessage = message.toLowerCase();
       return lowerMessage.includes('starting research') || 
              lowerMessage.includes('iteration') ||
@@ -298,7 +295,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
     // First pass: create initial groups
     logs.forEach((log) => {
       const type = getGroupType(log.message);
-      const isNewOperation = shouldStartNewGroup(log.message, currentGroup?.type);
+      const isNewOperation = shouldStartNewGroup(log.message);
       
       if (!currentGroup || isNewOperation) {
         if (currentGroup) {
@@ -336,7 +333,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
     const mergedGroups = mergeGroups(groups);
 
     // Add writing report group if needed
-    if (showWritingReport && !mergedGroups.some((g) => g.title.includes('Writing Report'))) {
+    if (showWritingReport && !mergedGroups.some((g: LogGroup) => g.title.includes('Writing Report'))) {
       const reportGroup: LogGroup = {
         title: 'Writing Research Report',
         logs: [{
@@ -356,7 +353,6 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
   useEffect(() => {
     if (logs.length !== lastLogsLength.current) {
       lastLogsLength.current = logs.length;
-      setShouldAutoScroll(true);
       
       // Ensure we're at the bottom after new logs are added
       if (scrollContainerRef.current) {
@@ -379,7 +375,6 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
   // Auto-expand latest group when logs change
   useEffect(() => {
     if (logGroups.length > 0) {
-      isAutoExpanding.current = true;
       setExpandedGroups(new Set([logGroups.length - 1]));
       
       // Ensure we scroll after expanding
@@ -392,7 +387,6 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
             top: container.scrollHeight,
             behavior: 'smooth'
           });
-          isAutoExpanding.current = false;
         }, 350); // Slightly longer than the animation to ensure completion
       }
     }
@@ -405,14 +399,12 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
       const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
       
       if (Math.abs(scrollTop - lastUserScrollPosition.current) > 10) {
-        setShouldAutoScroll(isNearBottom);
         lastUserScrollPosition.current = scrollTop;
       }
     }
   };
 
   const toggleGroup = (index: number) => {
-    isAutoExpanding.current = false; // Manual toggle
     setExpandedGroups((prev) => {
       const next = new Set(prev);
       if (next.has(index)) {
@@ -420,7 +412,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
       } else {
         next.add(index);
         // Scroll to the expanded group after animation
-        expandTimeoutRef.current = setTimeout(() => {
+        setTimeout(() => {
           const element = document.getElementById(`log-group-${index}`);
           if (element) {
             element.scrollIntoView({ behavior: 'smooth', block: 'nearest' });

@@ -135,10 +135,9 @@ function App() {
         >
           <SearchBox
             onSearch={handleSearch}
-            disabled={isLoading || isResearching}
+            disabled={isResearching}
             isResearching={isResearching}
             currentQuery={currentQuery}
-            isLoading={isLoading}
           />
           <ResearchProgress 
             logs={logs} 

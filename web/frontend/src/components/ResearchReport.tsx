@@ -175,7 +175,7 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
   },
 }));
 
-const SourceTooltip = styled(Tooltip)(({ theme }) => ({
+const SourceTooltip = styled(Tooltip)(() => ({
   '& .MuiTooltip-tooltip': {
     backgroundColor: 'transparent',
     padding: 0,
@@ -192,7 +192,6 @@ const SourceCard = styled(Card)(({ theme }) => ({
 
 const ResearchReport = ({ content }: ResearchReportProps) => {
   const theme = useTheme();
-  const isLargeScreen = useMediaQuery(theme.breakpoints.up('md'));
 
   // Parse sources from the content
   const { processedContent, sources } = useMemo(() => {
@@ -238,9 +237,12 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
     return { processedContent: mainContent, sources };
   }, [content]);
 
-  const renderSourceTooltip = (sourceKey: string) => {
+  // Fix JSX namespace issues
+  type RenderSourceTooltipFn = (sourceKey: string) => React.ReactElement | null;
+
+  const renderSourceTooltip = (sourceKey: string): React.ReactElement | null => {
     const source = sources.get(sourceKey);
-    if (!source) return sourceKey;
+    if (!source) return null;
 
     return (
       <SourceTooltip
@@ -292,6 +294,35 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
     );
   };
 
+  const processChildren = (children: any, renderTooltip: RenderSourceTooltipFn) => {
+    return React.Children.map(children, (child) => {
+      if (typeof child === 'string') {
+        const parts = child.split(/(\[\d+\])/g);
+        return parts.map((part, i) => {
+          const sourceMatch = part.match(/\[(\d+)\]/);
+          if (sourceMatch) {
+            const element = renderTooltip(part);
+            return element ? <React.Fragment key={i}>{element}</React.Fragment> : part;
+          }
+          return part;
+        });
+      }
+      return child;
+    });
+  };
+
+  const processParagraphChildren = (children: any, renderTooltip: RenderSourceTooltipFn) => {
+    return <Typography variant="body1" paragraph>{processChildren(children, renderTooltip)}</Typography>;
+  };
+
+  const processTableCellChildren = (children: any, renderTooltip: RenderSourceTooltipFn) => {
+    return <td>{processChildren(children, renderTooltip)}</td>;
+  };
+
+  const processListItemChildren = (children: any, renderTooltip: RenderSourceTooltipFn) => {
+    return <li>{processChildren(children, renderTooltip)}</li>;
+  };
+
   const components = useMemo(() => ({
     p: ({ children }: any) => processParagraphChildren(children, renderSourceTooltip),
     strong: ({ children }: any) => (
@@ -301,33 +332,7 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
     ),
     td: ({ children }: any) => processTableCellChildren(children, renderSourceTooltip),
     li: ({ children }: any) => processListItemChildren(children, renderSourceTooltip),
-  }), [sources, renderSourceTooltip]);
-
-  // Add these new helper functions outside the component
-  const processChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
-    return React.Children.map(children, (child) => {
-      if (typeof child === 'string') {
-        const parts = child.split(/(\[\d+\])/g);
-        return parts.map((part, i) => {
-          const sourceMatch = part.match(/\[(\d+)\]/);
-          return sourceMatch ? <React.Fragment key={i}>{renderSourceTooltip(part)}</React.Fragment> : part;
-        });
-      }
-      return child;
-    });
-  };
-
-  const processParagraphChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
-    return <Typography variant="body1" paragraph>{processChildren(children, renderSourceTooltip)}</Typography>;
-  };
-
-  const processTableCellChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
-    return <td>{processChildren(children, renderSourceTooltip)}</td>;
-  };
-
-  const processListItemChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
-    return <li>{processChildren(children, renderSourceTooltip)}</li>;
-  };
+  }), [sources]);
 
   return (
     <Fade in={true} timeout={500}>

@@ -6,10 +6,9 @@ interface SearchBoxProps {
   disabled: boolean;
   isResearching: boolean;
   currentQuery: string | null;
-  isLoading: boolean;
 }
 
-const SearchBox = ({ onSearch, disabled, isResearching, currentQuery, isLoading }: SearchBoxProps) => {
+const SearchBox = ({ onSearch, disabled, isResearching, currentQuery }: SearchBoxProps) => {
   const [query, setQuery] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
