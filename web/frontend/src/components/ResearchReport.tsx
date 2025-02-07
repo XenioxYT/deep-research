@@ -114,9 +114,17 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
     
     '& table': {
       width: '100%',
-      borderCollapse: 'separate',
-      borderSpacing: 0,
+      borderCollapse: 'collapse',
       marginBottom: theme.spacing(3),
+      display: 'block',
+      overflowX: 'auto',
+      '& thead': {
+        position: 'sticky',
+        top: '-1px',
+        zIndex: 2,
+        backgroundColor: theme.palette.background.paper,
+        boxShadow: theme.shadows[1]
+      },
       '& th': {
         backgroundColor: 'rgba(187, 134, 252, 0.1)',
         color: theme.palette.primary.light,
@@ -124,6 +132,8 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
         textAlign: 'left',
         padding: theme.spacing(1.5),
         borderBottom: `2px solid ${theme.palette.divider}`,
+        position: 'sticky',
+        top: '0',
       },
       '& td': {
         padding: theme.spacing(1.5),
@@ -165,16 +175,7 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
   },
 }));
 
-const SourceTooltip = styled(({ className, title, children, ...props }: {
-  className?: string;
-  title: React.ReactElement;
-  children: React.ReactElement;
-  [key: string]: any;
-}) => (
-  <Tooltip {...props} classes={{ popper: className }} title={title}>
-    {children}
-  </Tooltip>
-))(({ theme }) => ({
+const SourceTooltip = styled(Tooltip)(({ theme }) => ({
   '& .MuiTooltip-tooltip': {
     backgroundColor: 'transparent',
     padding: 0,
@@ -195,158 +196,137 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
 
   // Parse sources from the content
   const { processedContent, sources } = useMemo(() => {
-    // Updated regex to match source entries more reliably
-    const sourcesRegex = /\[(\d+)\]\s+(.+?)\n-\s*URL:\s*(.+?)\n-\s*Relevance Score:\s*([\d.]+)\n-\s*Domain:\s*(.+?)(?:\n|$)/g;
     const sources = new Map<string, Source>();
-    let matches;
-    let sourceSection = '';
+    
+    const sourcesSectionMatch = content.match(/(?:## Sources Used|## Sources|## References)\n\n([\s\S]+)$/);
+    if (!sourcesSectionMatch) {
+      return { processedContent: content, sources };
+    }
 
-    // Find all source entries at the end of the document
-    let lastIndex = -1;
-    while ((matches = sourcesRegex.exec(content)) !== null) {
-      const [fullMatch, id, title, url, score, domain] = matches;
+    const sourcesSection = sourcesSectionMatch[1];
+    const mainContent = content.slice(0, sourcesSectionMatch.index).trim();
+    
+    const sourceEntries = sourcesSection.split('\n\n');
+    sourceEntries.forEach(entry => {
+      const idMatch = entry.match(/^\[(\d+)\]/);
+      if (!idMatch) return;
+
+      const id = idMatch[1];
       const sourceKey = `[${id}]`;
+
+      const urlMatch = entry.match(/URL:\s*(.+?)(?:\n|$)/);
+      const url = urlMatch ? urlMatch[1].trim() : '';
+
+      const titleMatch = entry.match(/^\[\d+\]\s+(.+?)(?:\n|$)/);
+      const title = titleMatch ? titleMatch[1].trim() : '';
+
+      const domainMatch = entry.match(/Domain:\s*(.+?)(?:\n|$)/);
+      const domain = domainMatch ? domainMatch[1].trim() : new URL(url).hostname;
+
+      const scoreMatch = entry.match(/(?:Relevance )?Score:\s*([\d.]+)/);
+      const score = scoreMatch ? parseFloat(scoreMatch[1]) : 1.0;
+
       sources.set(sourceKey, {
         id: sourceKey,
-        title: title.trim(),
-        url: url.trim(),
-        domain: domain.trim(),
-        score: parseFloat(score),
+        title,
+        url,
+        domain,
+        score,
       });
-      sourceSection += fullMatch;
-      lastIndex = matches.index;
-    }
+    });
 
-    // Remove the sources section from the content
-    const processedContent = lastIndex > -1 ? content.slice(0, lastIndex).trim() : content;
-
-    return { processedContent, sources };
+    return { processedContent: mainContent, sources };
   }, [content]);
 
-  // Custom renderer for text to handle reference links
-  const renderText = (text: React.ReactNode): React.ReactNode => {
-    if (typeof text !== 'string') {
-      return text;
-    }
+  const renderSourceTooltip = (sourceKey: string) => {
+    const source = sources.get(sourceKey);
+    if (!source) return sourceKey;
 
-    // First process citations
-    const parts = text.split(/(\[\d+\](?:\s*\[\d+\])*(?:[.,]?\s*|\.$|\)?|$))/g);
-    const processedParts = parts.map((part, partIndex) => {
-      const ref = part.match(/^\[\d+\]$/);
-      if (ref) {
-        const source = sources.get(ref[0]);
-        if (source) {
-          return (
-            <SourceTooltip
-              key={`${ref}-${partIndex}`}
-              title={
-                <SourceCard>
-                  <CardContent>
-                    <Typography variant="subtitle1" gutterBottom>
-                      {source.title}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" component="a" 
-                      href={source.url} 
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      sx={{ 
-                        display: 'block', 
-                        mb: 1,
-                        color: 'primary.main',
-                        textDecoration: 'none',
-                        '&:hover': {
-                          textDecoration: 'underline',
-                        },
-                      }}
-                    >
-                      {source.url}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Relevance Score: {source.score.toFixed(2)}
-                    </Typography>
-                  </CardContent>
-                </SourceCard>
-              }
-              placement="top"
-              arrow
-            >
-              <Box
-                component="span"
-                sx={{
+    return (
+      <SourceTooltip
+        title={
+          <SourceCard>
+            <CardContent>
+              <Typography variant="subtitle1" gutterBottom>
+                {source.title}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" component="a" 
+                href={source.url} 
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{ 
+                  display: 'block', 
+                  mb: 1,
                   color: 'primary.main',
-                  cursor: 'pointer',
+                  textDecoration: 'none',
                   '&:hover': {
                     textDecoration: 'underline',
                   },
-                  display: 'inline',
                 }}
               >
-                {ref[0]}
-              </Box>
-            </SourceTooltip>
-          );
+                {source.url}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Relevance Score: {source.score.toFixed(2)}
+              </Typography>
+            </CardContent>
+          </SourceCard>
         }
-      }
+        placement="top"
+        arrow
+      >
+        <Box
+          component="span"
+          sx={{
+            color: 'primary.main',
+            cursor: 'pointer',
+            '&:hover': {
+              textDecoration: 'underline',
+            },
+            display: 'inline',
+          }}
+        >
+          {sourceKey}
+        </Box>
+      </SourceTooltip>
+    );
+  };
 
-      // Then process code blocks within non-citation text
-      const codeBlocks: Array<{
-        placeholder: string;
-        content: string;
-      }> = [];
-      let currentIndex = 0;
+  const components = useMemo(() => ({
+    p: ({ children }: any) => processParagraphChildren(children, renderSourceTooltip),
+    strong: ({ children }: any) => (
+      <Typography component="strong" sx={{ fontWeight: 'bold', display: 'inline' }}>
+        {children}
+      </Typography>
+    ),
+    td: ({ children }: any) => processTableCellChildren(children, renderSourceTooltip),
+    li: ({ children }: any) => processListItemChildren(children, renderSourceTooltip),
+  }), [sources, renderSourceTooltip]);
 
-      // Replace backtick content with placeholders and collect code blocks
-      const textWithPlaceholders = part.replace(/`[^`]+`/g, (match) => {
-        const placeholder = `__CODE_BLOCK_${currentIndex}__`;
-        codeBlocks.push({
-          placeholder,
-          content: match.slice(1, -1) // Remove backticks
+  // Add these new helper functions outside the component
+  const processChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
+    return React.Children.map(children, (child) => {
+      if (typeof child === 'string') {
+        const parts = child.split(/(\[\d+\])/g);
+        return parts.map((part, i) => {
+          const sourceMatch = part.match(/\[(\d+)\]/);
+          return sourceMatch ? <React.Fragment key={i}>{renderSourceTooltip(part)}</React.Fragment> : part;
         });
-        currentIndex++;
-        return placeholder;
-      });
-
-      const elements: React.ReactNode[] = [];
-      let remainingText = textWithPlaceholders;
-
-      // Replace code block placeholders with actual components
-      codeBlocks.forEach(({ placeholder, content }) => {
-        if (remainingText.includes(placeholder)) {
-          const [before, ...rest] = remainingText.split(placeholder);
-          if (before) elements.push(before);
-          
-          elements.push(
-            <Typography
-              key={`code-${placeholder}`}
-              component="code"
-              sx={{
-                backgroundColor: 'rgba(187, 134, 252, 0.1)',
-                color: theme.palette.primary.light,
-                padding: '2px 6px',
-                borderRadius: 1,
-                fontSize: '0.9em',
-                fontFamily: 'Roboto Mono, monospace',
-                display: 'inline',
-              }}
-            >
-              {content}
-            </Typography>
-          );
-          
-          remainingText = rest.join(placeholder);
-        }
-      });
-
-      if (remainingText) {
-        elements.push(remainingText);
       }
-
-      return elements.length > 0 ? (
-        <React.Fragment key={`part-${partIndex}`}>{elements}</React.Fragment>
-      ) : part;
+      return child;
     });
+  };
 
-    return <>{processedParts}</>;
+  const processParagraphChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
+    return <Typography variant="body1" paragraph>{processChildren(children, renderSourceTooltip)}</Typography>;
+  };
+
+  const processTableCellChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
+    return <td>{processChildren(children, renderSourceTooltip)}</td>;
+  };
+
+  const processListItemChildren = (children: any, renderSourceTooltip: (sourceKey: string) => JSX.Element) => {
+    return <li>{processChildren(children, renderSourceTooltip)}</li>;
   };
 
   return (
@@ -354,7 +334,7 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
       <Paper
         elevation={3}
         sx={{
-          backgroundColor: 'background.paper',
+          backgroundColor: theme.palette.background.paper,
           borderRadius: 2,
           overflow: 'hidden',
         }}
@@ -371,142 +351,7 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
               className="markdown-body"
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={[rehypeKatex]}
-              components={{
-                p: ({ children }) => (
-                  <Typography variant="body1" paragraph>
-                    {renderText(children)}
-                  </Typography>
-                ),
-                li: ({ children }) => {
-                  // Helper function to extract text content from React nodes
-                  const extractText = (nodes: React.ReactNode): string => {
-                    if (typeof nodes === 'string') return nodes;
-                    if (!nodes) return '';
-                    
-                    if (Array.isArray(nodes)) {
-                      return nodes.map(extractText).join('');
-                    }
-                    
-                    if (React.isValidElement(nodes)) {
-                      const element = nodes as React.ReactElement;
-                      return extractText(element.props?.children || '');
-                    }
-                    
-                    return '';
-                  };
-
-                  // Get the full text content including any nested elements
-                  const fullText = extractText(children);
-
-                  return (
-                    <Typography 
-                      component="li"
-                      sx={{
-                        '& > *': { display: 'inline' },
-                        '& strong, & em': { display: 'inline' },
-                      }}
-                    >
-                      {renderText(fullText)}
-                    </Typography>
-                  );
-                },
-                strong: ({ children }) => (
-                  <Typography
-                    component="strong"
-                    sx={{ 
-                      fontWeight: 'bold',
-                      display: 'inline',
-                    }}
-                  >
-                    {renderText(children)}
-                  </Typography>
-                ),
-                em: ({ children }) => (
-                  <Typography
-                    component="em"
-                    sx={{ 
-                      fontStyle: 'italic',
-                      display: 'inline',
-                    }}
-                  >
-                    {renderText(children)}
-                  </Typography>
-                ),
-                a: ({ children, href }) => (
-                  <Typography
-                    component="a"
-                    href={href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    sx={{
-                      color: 'primary.main',
-                      textDecoration: 'none',
-                      borderBottom: '1px solid',
-                      borderColor: 'primary.main',
-                      display: 'inline',
-                      '&:hover': {
-                        color: 'primary.light',
-                        borderColor: 'primary.light',
-                      },
-                    }}
-                  >
-                    {renderText(children)}
-                  </Typography>
-                ),
-                code: ({ node, inline, className, children, ...props }: {
-                  node?: any;
-                  inline?: boolean;
-                  className?: string;
-                  children: React.ReactNode;
-                  [key: string]: any;
-                }) => {
-                  const match = /language-(\w+)/.exec(className || '');
-                  const isLatex = match && match[1] === 'latex';
-                  
-                  if (inline) {
-                    return (
-                      <Typography
-                        component="code"
-                        sx={{
-                          backgroundColor: 'rgba(187, 134, 252, 0.1)',
-                          color: theme.palette.primary.light,
-                          padding: '2px 6px',
-                          borderRadius: 1,
-                          fontSize: '0.9em',
-                          fontFamily: 'Roboto Mono, monospace',
-                          display: 'inline',
-                        }}
-                        {...props}
-                      >
-                        {children}
-                      </Typography>
-                    );
-                  }
-
-                  return (
-                    <Box
-                      component="pre"
-                      sx={{
-                        backgroundColor: 'rgba(187, 134, 252, 0.05)',
-                        padding: theme.spacing(2),
-                        borderRadius: theme.shape.borderRadius,
-                        overflow: 'auto',
-                        margin: theme.spacing(2, 0),
-                        '& code': {
-                          backgroundColor: 'transparent',
-                          padding: 0,
-                          fontSize: '0.9em',
-                          fontFamily: 'Roboto Mono, monospace',
-                        },
-                      }}
-                    >
-                      <code className={className} {...props}>
-                        {children}
-                      </code>
-                    </Box>
-                  );
-                },
-              }}
+              components={components}
             >
               {processedContent}
             </ReactMarkdown>
