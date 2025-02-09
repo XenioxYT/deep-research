@@ -202,17 +202,32 @@ const SourceCard = styled(Card)(({ theme }) => ({
 const ResearchReport = ({ content }: ResearchReportProps) => {
   const theme = useTheme();
 
-  // Parse sources from the content
+  // Add custom LaTeX processor
+  const processLatex = (text: string) => {
+    // First escape dollar signs that are clearly part of currency (e.g., $10.99)
+    let processed = text.replace(/\$\d+(?:\.\d{1,2})?/g, match => {
+      return match.replace('$', '\\$');
+    });
+    
+    // Then handle LaTeX expressions (both $...$ and $$...$$)
+    // No need to convert anything - let both formats render as LaTeX
+    return processed;
+  };
+
+  // Update the content processing to handle LaTeX
   const { processedContent, sources } = useMemo(() => {
     const sources = new Map<string, Source>();
     
-    const sourcesSectionMatch = content.match(/(?:## Sources Used|## Sources|## References)\n\n([\s\S]+)$/);
+    // Process LaTeX before handling sources
+    let processedText = processLatex(content);
+    
+    const sourcesSectionMatch = processedText.match(/(?:## Sources Used|## Sources|## References)\n\n([\s\S]+)$/);
     if (!sourcesSectionMatch) {
-      return { processedContent: content, sources };
+      return { processedContent: processedText, sources };
     }
 
     const sourcesSection = sourcesSectionMatch[1];
-    const mainContent = content.slice(0, sourcesSectionMatch.index).trim();
+    const mainContent = processedText.slice(0, sourcesSectionMatch.index).trim();
     
     const sourceEntries = sourcesSection.split('\n\n');
     sourceEntries.forEach(entry => {
