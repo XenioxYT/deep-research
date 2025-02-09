@@ -206,7 +206,6 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
   const { processedContent, sources } = useMemo(() => {
     const sources = new Map<string, Source>();
     
-    // More flexible regex to match source references at the end
     const sourcesSectionMatch = content.match(/(?:## Sources Used|## Sources|## References)\s*([\s\S]+)$/);
     if (!sourcesSectionMatch) {
       return { processedContent: content, sources };
@@ -215,7 +214,7 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
     const sourcesSection = sourcesSectionMatch[1];
     const mainContent = content.slice(0, sourcesSectionMatch.index).trim();
     
-    // More flexible source entry parsing
+    // Split by numbered entries
     const sourceEntries = sourcesSection.split(/(?=\[\d+\])/);
     sourceEntries.forEach(entry => {
       const idMatch = entry.match(/^\[(\d+)\]/);
@@ -224,21 +223,23 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
       const id = idMatch[1];
       const sourceKey = `[${id}]`;
 
-      // More flexible matching for source details
-      const urlMatch = entry.match(/(?:URL:|http[s]?:\/\/)[^\s\n]*/i);
-      const url = urlMatch ? urlMatch[0].replace(/^URL:\s*/, '').trim() : '';
+      // Extract URL
+      const urlMatch = entry.match(/URL:\s*(https?:\/\/[^\s\n]+)/i);
+      const url = urlMatch ? urlMatch[1].trim() : '';
 
-      // Get title by removing the ID and URL from the entry
+      // Extract relevance score
+      const scoreMatch = entry.match(/Relevance Score:\s*([\d.]+)/i);
+      const score = scoreMatch ? parseFloat(scoreMatch[1]) : 1.0;
+
+      // Extract domain
+      const domainMatch = entry.match(/Domain:\s*([^\s\n]+)/i);
+      const domain = domainMatch ? domainMatch[1].trim() : (url ? new URL(url).hostname : '');
+
+      // Get title by taking the first line after the ID, before any metadata
       let title = entry
-        .replace(/^\[\d+\]\s*/, '')
-        .replace(/(?:URL:|http[s]?:\/\/)[^\s\n]*/i, '')
+        .split('\n')[0]         // Take first line
+        .replace(/^\[\d+\]\s*/, '') // Remove ID
         .trim();
-
-      // If no explicit domain, try to extract from URL
-      const domain = url ? new URL(url).hostname : '';
-
-      // Default score if not specified
-      const score = 1.0;
 
       if (title || url) {
         sources.set(sourceKey, {
@@ -269,22 +270,35 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
               <Typography variant="subtitle1" gutterBottom>
                 {source.title}
               </Typography>
-              <Typography variant="body2" color="text.secondary" component="a" 
-                href={source.url} 
-                target="_blank"
-                rel="noopener noreferrer"
-                sx={{ 
-                  display: 'block', 
-                  mb: 1,
-                  color: 'primary.main',
-                  textDecoration: 'none',
-                  '&:hover': {
-                    textDecoration: 'underline',
-                  },
-                }}
-              >
-                {source.url}
-              </Typography>
+              {source.url && (
+                <Typography 
+                  variant="body2" 
+                  color="text.secondary" 
+                  component="div"
+                  sx={{ mb: 1 }}
+                >
+                  <Box
+                    component="a"
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    sx={{
+                      color: 'primary.main',
+                      textDecoration: 'none',
+                      '&:hover': {
+                        textDecoration: 'underline',
+                      },
+                    }}
+                  >
+                    {source.url}
+                  </Box>
+                </Typography>
+              )}
+              {source.domain && (
+                <Typography variant="body2" color="text.secondary">
+                  Domain: {source.domain}
+                </Typography>
+              )}
               <Typography variant="body2" color="text.secondary">
                 Relevance Score: {source.score.toFixed(2)}
               </Typography>
