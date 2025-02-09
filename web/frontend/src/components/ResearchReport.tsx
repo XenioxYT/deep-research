@@ -206,7 +206,8 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
   const { processedContent, sources } = useMemo(() => {
     const sources = new Map<string, Source>();
     
-    const sourcesSectionMatch = content.match(/(?:## Sources Used|## Sources|## References)\n\n([\s\S]+)$/);
+    // More flexible regex to match source references at the end
+    const sourcesSectionMatch = content.match(/(?:## Sources Used|## Sources|## References)\s*([\s\S]+)$/);
     if (!sourcesSectionMatch) {
       return { processedContent: content, sources };
     }
@@ -214,7 +215,8 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
     const sourcesSection = sourcesSectionMatch[1];
     const mainContent = content.slice(0, sourcesSectionMatch.index).trim();
     
-    const sourceEntries = sourcesSection.split('\n\n');
+    // More flexible source entry parsing
+    const sourceEntries = sourcesSection.split(/(?=\[\d+\])/);
     sourceEntries.forEach(entry => {
       const idMatch = entry.match(/^\[(\d+)\]/);
       if (!idMatch) return;
@@ -222,25 +224,31 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
       const id = idMatch[1];
       const sourceKey = `[${id}]`;
 
-      const urlMatch = entry.match(/URL:\s*(.+?)(?:\n|$)/);
-      const url = urlMatch ? urlMatch[1].trim() : '';
+      // More flexible matching for source details
+      const urlMatch = entry.match(/(?:URL:|http[s]?:\/\/)[^\s\n]*/i);
+      const url = urlMatch ? urlMatch[0].replace(/^URL:\s*/, '').trim() : '';
 
-      const titleMatch = entry.match(/^\[\d+\]\s+(.+?)(?:\n|$)/);
-      const title = titleMatch ? titleMatch[1].trim() : '';
+      // Get title by removing the ID and URL from the entry
+      let title = entry
+        .replace(/^\[\d+\]\s*/, '')
+        .replace(/(?:URL:|http[s]?:\/\/)[^\s\n]*/i, '')
+        .trim();
 
-      const domainMatch = entry.match(/Domain:\s*(.+?)(?:\n|$)/);
-      const domain = domainMatch ? domainMatch[1].trim() : new URL(url).hostname;
+      // If no explicit domain, try to extract from URL
+      const domain = url ? new URL(url).hostname : '';
 
-      const scoreMatch = entry.match(/(?:Relevance )?Score:\s*([\d.]+)/);
-      const score = scoreMatch ? parseFloat(scoreMatch[1]) : 1.0;
+      // Default score if not specified
+      const score = 1.0;
 
-      sources.set(sourceKey, {
-        id: sourceKey,
-        title,
-        url,
-        domain,
-        score,
-      });
+      if (title || url) {
+        sources.set(sourceKey, {
+          id: sourceKey,
+          title,
+          url,
+          domain,
+          score,
+        });
+      }
     });
 
     return { processedContent: mainContent, sources };

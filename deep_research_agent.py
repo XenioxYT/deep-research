@@ -64,7 +64,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-flash-exp',
+            'gemini-2.0-pro-exp-02-05',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
@@ -253,7 +253,8 @@ class DeepResearchAgent:
 
         Query: '{main_query}'
 
-        First, determine if this is a SIMPLE query that needs no additional research:
+        First, check for and correct any spelling or grammatical errors in the query.
+        Then determine if this is a SIMPLE query that needs no additional research:
         - Basic arithmetic (e.g., "what is 2+2")
         - Single fact lookups (e.g., "capital of France")
         - Simple definitions (e.g., "what is a tree")
@@ -261,13 +262,13 @@ class DeepResearchAgent:
         - Yes/no questions with obvious answers
 
         Format your response EXACTLY as follows:
+        CORRECTED_QUERY: [Original query if correct, or corrected version if there are spelling/grammar errors]
         TYPE: [SIMPLE/COMPLEX]
         REASON: [One sentence explanation]
         QUERIES:
-        [If SIMPLE: Only list the original query
-        If COMPLEX: Generate 5-10 focused search queries, one per line, starting with numbers
+        [If SIMPLE: Only list the corrected query
+        If COMPLEX: Generate focused search queries, one per line, starting with numbers
         - Keep queries generic for current/latest things
-        - Keep each query under 5-6 words
         - Keep queries open ended, not too specific]"""
 
         try:
@@ -696,9 +697,9 @@ class DeepResearchAgent:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
         3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
-           - LOW: 1500 chars - For basic/overview content (default)
-           - MEDIUM: 3000 chars - For moderate detail
-           - HIGH: 8000 chars - For in-depth analysis
+           - LOW: 300 chars - For basic/overview content (default)
+           - MEDIUM: 6000 chars - For moderate detail
+           - HIGH: 10000 chars - For in-depth analysis
         
         Consider these factors:
         - Content depth and relevance to query
@@ -751,7 +752,7 @@ class DeepResearchAgent:
                     # Validate and normalize scraping level
                     scrape_level = scrape_level.upper()
                     if scrape_level not in ['LOW', 'MEDIUM', 'HIGH']:
-                        scrape_level = 'LOW'  # Default to LOW if invalid
+                        scrape_level = 'MEDIUM'  # Default to LOW if invalid
                     
                     scrape_decisions[url] = {
                         'should_scrape': should_scrape,
@@ -800,11 +801,11 @@ class DeepResearchAgent:
     def get_scrape_limit(self, scrape_level: str) -> int:
         """Get character limit based on scraping level."""
         limits = {
-            'LOW': 1500,
-            'MEDIUM': 3000,
-            'HIGH': 8000
+            'LOW': 3000,
+            'MEDIUM': 6000,
+            'HIGH': 10000
         }
-        return limits.get(scrape_level.upper(), 1500)  # Default to LOW if invalid
+        return limits.get(scrape_level.upper(), 3000)  # Default to LOW if invalid
 
     def rank_all_results(self, main_query: str) -> List[Dict]:
         """Get all results sorted by their existing ranking scores."""
@@ -833,12 +834,11 @@ class DeepResearchAgent:
         
         IMPORTANT DECISION GUIDELINES:
         1. For simple factual queries (e.g. "2+2", "capital of France"), say NO immediately and mark as SIMPLE
-        2. For queries that can be fully answered with current findings, say NO
-        3. For queries needing more depth/verification:
-           - On iteration 0-1: Say YES if significant information is missing
-           - On iteration 2: Only say YES if crucial information is missing
-           - On iteration 3+: Strongly lean towards NO unless absolutely critical information is missing
-        4. Consider the query ANSWERED when you have:
+        2. For queries needing more depth/verification:
+           - On iteration 0-2: Say YES if significant information is missing
+           - On iteration 3: Only say YES if crucial information is missing
+           - On iteration 4+: Strongly lean towards NO unless absolutely critical information is missing
+        3. Consider the query ANSWERED when you have:
            - Sufficient high-quality sources (relevance_score > 0.6)
            - Enough information to provide a comprehensive answer
            - Cross-verified key information from multiple sources
@@ -1174,7 +1174,7 @@ class DeepResearchAgent:
                 - Format numbers naturally with proper thousands separators
                 - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
                 - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate. Be sure to mention when and where you have used your own knowledge!
-                - You can use LATEX formatting. ALWAYS wrap mathematical equations in $$.
+                - You can use LaTeX formatting. ALWAYS wrap mathematical equations in $$ for display math or $ for inline math. DO NOT use HTML formatting, like <sup> or <sub>. Use LaTeX equivalents like ^{2} for superscript and _{2} for subscript.
                 
                 Start the report immediately after this prompt without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless for code snippets).
@@ -1444,18 +1444,6 @@ class DeepResearchAgent:
         report_generator, sources_used = await self.generate_report(
             query, research_data, latest_report_structure or """
             # Research Report: {query}
-            
-            ## Summary
-            Present the main findings or lack thereof.
-            
-            ## Available Information
-            Detail any information found, even if limited.
-            
-            ## Limitations
-            Explain why information might be limited or unavailable.
-            
-            ## Recommendations
-            Suggest alternative approaches or queries if needed.
             """
         )
         
