@@ -499,7 +499,10 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
               
               <Collapse in={expandedGroups.has(groupIndex)} timeout="auto">
                 <Box sx={{ p: 2, pt: 0 }}>
-                  {group.logs.map((log, logIndex) => (
+                  {group.logs.filter((log, index, array) => {
+                    // Show the log if it's the first one or if it's different from the previous log
+                    return index === 0 || log.message !== array[index - 1].message;
+                  }).map((log, logIndex, filteredLogs) => (
                     <Fade in={true} key={logIndex} timeout={300}>
                       <Box
                         sx={{
@@ -508,7 +511,7 @@ const ResearchProgress = ({ logs, visible }: ResearchProgressProps) => {
                           alignItems: 'flex-start',
                           gap: 2,
                           fontSize: '0.9rem',
-                          borderBottom: logIndex < group.logs.length - 1 ? `1px solid ${theme.palette.divider}` : 'none',
+                          borderBottom: logIndex < filteredLogs.length - 1 ? `1px solid ${theme.palette.divider}` : 'none',
                           '&:hover': {
                             backgroundColor: theme.palette.action.hover,
                           },
