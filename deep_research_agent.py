@@ -1536,7 +1536,7 @@ class DeepResearchAgent:
                 self.logger.info("Updated report structure based on latest analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
-                self.logger.info(f"Continuing research - Iteration {self.research_iterations + 1}")
+                self.logger.info(f"Continuing research - Iteration {self.research_iterations + 2}")
                 self.research_iterations += 1
                 continue
             else:
