@@ -21,6 +21,8 @@ from functools import partial
 import httplib2
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from vertexai.preview import tokenization
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
 
 class DeepResearchAgent:
     def __init__(self):
@@ -91,6 +93,9 @@ class DeepResearchAgent:
         self.tokenizer = tokenization.get_tokenizer_for_model(self.model_name)
         self.token_usage_by_operation = defaultdict(int)
         self.content_tokens = 0  # Track tokens from stored content separately
+        
+        # Initialize YouTube transcript formatter
+        self.transcript_formatter = TextFormatter()
 
     async def __aenter__(self):
         """Async initialization when entering context."""
@@ -214,18 +219,59 @@ class DeepResearchAgent:
         self.logger = logger
 
     def is_youtube_url(self, url: str) -> bool:
-        """Check if URL is from YouTube."""
-        parsed = urlparse(url)
-        return any(yt in parsed.netloc for yt in ['youtube.com', 'youtu.be'])
+        """Check if URL is a YouTube video (not channel/user/playlist)."""
+        if not any(yt in urlparse(url).netloc for yt in ['youtube.com', 'youtu.be']):
+            return False
+            
+        # Check if it's a video URL by looking for specific patterns
+        video_patterns = [
+            r'youtube\.com/watch\?v=',  # Standard video URL
+            r'youtu\.be/',             # Short URL
+            r'youtube\.com/embed/',     # Embedded video
+            r'youtube\.com/v/',         # Old style video URL
+            r'youtube\.com/shorts/'     # YouTube shorts
+        ]
+        
+        # Return True only if it matches a video pattern
+        return any(re.search(pattern, url) for pattern in video_patterns)
 
     def rewrite_url(self, url: str) -> str:
-        """Rewrite URLs based on defined rules."""
+        """Rewrite URLs based on defined rules to use alternative frontends."""
         parsed = urlparse(url)
         
-        # Reddit URL rewrite
-        if 'reddit.com' in parsed.netloc:
-            # Replace reddit.com with rl.bloat.cat while keeping the rest of the URL structure
-            return url.replace('reddit.com', 'redlib.kylrth.com/')
+        # Dictionary of domain rewrites for better scraping
+        rewrites = {
+            # Social media
+            'twitter.com': 'nitter.net',
+            'x.com': 'nitter.net',
+            'reddit.com': 'redlib.kylrth.com',
+            'instagram.com': 'imginn.com',
+            
+            # News and articles
+            'medium.com': 'scribe.rip',
+            'bloomberg.com': 'archive.ph',
+            'wsj.com': 'archive.ph',
+            'nytimes.com': 'archive.ph',
+            'ft.com': 'archive.ph',
+        }
+        
+        # Extract domain without subdomain
+        domain = '.'.join(parsed.netloc.split('.')[-2:])
+        
+        # Check if domain needs rewriting
+        if domain in rewrites:
+            new_domain = rewrites[domain]
+            
+            # Special handling for archive.ph (needs full URL encoded)
+            if new_domain == 'archive.ph':
+                return f'https://archive.ph/{url}'
+            
+            # For all other rewrites, maintain the path and query
+            new_url = url.replace(parsed.netloc, new_domain)
+            
+            # Log the rewrite
+            self.logger.info(f"Rewriting URL: {url} -> {new_url}")
+            return new_url
             
         return url
 
@@ -233,13 +279,14 @@ class DeepResearchAgent:
         """Check if URL should be skipped."""
         return (
             url in self.blacklisted_urls or
-            self.is_youtube_url(url) or
             any(ext in url for ext in ['.pdf', '.doc', '.docx', '.ppt', '.pptx'])
         )
 
     def generate_subqueries(self, main_query: str, research_state: Optional[Dict] = None) -> List[str]:
         """Generate sub-queries using AI to explore different aspects of the main query."""
         self.logger.info("Analyzing query and generating search queries...")
+        
+        MAX_QUERIES = 15  # Maximum number of queries to return
         
         context = ""
         if research_state and self.previous_queries:
@@ -249,27 +296,66 @@ class DeepResearchAgent:
             Based on the above context and gaps in current research, """
         
         prompt = f"""{self.system_context}
-        {context}Analyze this query and generate appropriate search queries.
+        {context}Generate comprehensive search queries to gather maximum relevant information about this query:
 
         Query: '{main_query}'
 
-        First, check for and correct any spelling or grammatical errors in the query.
-        Then determine if this is a SIMPLE query that needs no additional research:
-        - Basic arithmetic (e.g., "what is 2+2")
-        - Single fact lookups (e.g., "capital of France")
-        - Simple definitions (e.g., "what is a tree")
-        - Basic conversions (e.g., "10 km to miles")
-        - Yes/no questions with obvious answers
+        First, determine if this is a SIMPLE query (basic math, unit conversion, single fact lookup) or a COMPLEX query requiring research.
 
-        Format your response EXACTLY as follows:
-        CORRECTED_QUERY: [Original query if correct, or corrected version if there are spelling/grammar errors]
+        For COMPLEX queries, generate search queries that:
+        1. Cover all temporal aspects:
+           - Historical background and development
+           - Current state and recent developments
+           - Future predictions and trends
+
+        2. Include different information types:
+           - Core facts and definitions
+           - Statistics and data
+           - Expert analysis and opinions
+           - Case studies and examples
+           - Comparisons and contrasts
+           - Problems and solutions
+           - Impacts and implications
+
+        3. Use search optimization techniques:
+           - Exact phrase matches in quotes
+           - Site-specific searches (e.g., site:edu, site:gov)
+           - Date-range specific queries when relevant
+           - Include synonyms and related terms
+           - Combine key concepts in different ways
+           - Use both broad and specific queries
+           - Target authoritative sources
+
+        4. Response Format:
         TYPE: [SIMPLE/COMPLEX]
-        REASON: [One sentence explanation]
+        REASON: [One clear sentence explaining the classification]
         QUERIES:
-        [If SIMPLE: Only list the corrected query
-        If COMPLEX: Generate focused search queries, one per line, starting with numbers
-        - Keep queries generic for current/latest things
-        - Keep queries open ended, not too specific]"""
+        [If SIMPLE: Only output the original query
+        If COMPLEX: Generate up to {MAX_QUERIES} search queries that:
+        - Start each line with a number
+        - Include exact phrases in quotes when relevant
+        - Use site: operators for authoritative sources
+        - Combine terms to target specific aspects
+        - Avoid redundant queries
+        - Focus on the most important aspects first
+        - Ensure broad coverage within the {MAX_QUERIES} query limit]
+
+        Example of a COMPLEX query about "impact of remote work":
+        1. "remote work" impact statistics 2023-2024
+        2. site:edu research "remote work productivity"
+        3. challenges "distributed workforce" solutions
+        4. remote work employee mental health studies
+        5. "hybrid work model" vs "fully remote" comparison
+        6. site:gov telework policy guidelines
+        7. "remote work" environmental impact data
+        8. distributed teams collaboration best practices
+        9. "remote work" industry adoption rates
+        10. future "workplace trends" expert predictions
+        11. "remote work" cost savings analysis
+        12. site:linkedin.com remote work success stories
+        13. "distributed teams" management strategies
+        14. remote work technology infrastructure requirements
+        15. "work from home" impact on cities"""
 
         try:
             response = self.model.generate_content(prompt)
@@ -307,15 +393,18 @@ class DeepResearchAgent:
                             # Handle different number formats (1., 1-, 1), etc.
                             query = re.split(r'^\d+[.)-]\s*', line)[-1].strip()
                             
-                            # Validate query
-                            if query and len(query.split()) <= 6 and len(query) >= 3:
+                            # Only validate minimum length, no maximum
+                            if query and len(query) >= 3:
                                 subqueries.append(query)
+                                # Break if we've reached the maximum number of queries
+                                if len(subqueries) >= MAX_QUERIES:
+                                    break
                         except Exception as e:
                             self.logger.warning(f"Error processing query line '{line}': {e}")
                             continue
             
-            # Always include the main query for complex queries
-            if query_type == "COMPLEX" and main_query not in subqueries:
+            # Always include the main query for complex queries if we have room
+            if query_type == "COMPLEX" and main_query not in subqueries and len(subqueries) < MAX_QUERIES:
                 subqueries.append(main_query)
             
             # Log results
@@ -330,7 +419,7 @@ class DeepResearchAgent:
             self.logger.error(f"Error generating queries: {e}")
             return [main_query]
 
-    async def batch_web_search(self, queries: List[str], num_results: int = 8) -> List[Dict]:
+    async def batch_web_search(self, queries: List[str], num_results: int = 10) -> List[Dict]:
         """Perform multiple web searches in parallel with increased batch size."""
         self.logger.info(f"Batch searching {len(queries)} queries...")
         
@@ -543,6 +632,13 @@ class DeepResearchAgent:
         async def extract_with_page_pool(url: str) -> Tuple[str, str]:
             """Extract content using a page from the pool."""
             async with semaphore:
+                # Check if it's a YouTube URL
+                if self.is_youtube_url(url):
+                    transcript = await self.get_youtube_transcript(url)
+                    if transcript:
+                        return url, transcript
+                    return url, ""
+
                 page = None
                 try:
                     # Get a page from the pool
@@ -865,11 +961,20 @@ class DeepResearchAgent:
         SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
         SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
         REPORT_STRUCTURE: [A complete, customized report structure and guidelines based on the query type and findings. This should include:
-        1. Required sections and their order
-        2. What to include in each section
-        3. Specific formatting guidelines
-        4. Try to include a table or information where relevant
-        5. Any special considerations for this topic
+        1. Title of the report - Transform the query into a professional academic/research title:
+           - Capitalize important words
+           - Remove question marks and informal language
+           - Add relevant context from findings
+           - Format as a research paper title
+           Examples:
+           Query: "how does ai impact healthcare" → "The Impact of Artificial Intelligence on Modern Healthcare Systems"
+           Query: "what are the effects of climate change" → "Analysis of Climate Change Effects: Global Environmental Impact Assessment"
+           Query: "compare tesla and ford" → "Comparative Analysis of Tesla and Ford: Manufacturing, Innovation, and Market Position"
+        2. Required sections and their order (Do not include an introduction section)
+        3. What to include in each section
+        4. Specific formatting guidelines
+        5. Try to include a table or information where relevant
+        6. Any special considerations for this topic
         The structure should be tailored to the specific query type (e.g., product analysis, historical research, current events, etc.)]"""
         
         try:
@@ -992,17 +1097,20 @@ class DeepResearchAgent:
             # For simple queries, ensure we have a report structure
             if query_type == "SIMPLE" and not report_structure:
                 report_structure = """
-                # Answer to: {query}
+                # {A professional title based on the query, following academic style}
                 
                 ## Direct Answer
-                Provide the simple, factual answer to the query.
+                {Provide the direct, factual answer to the query}
                 
-                ## Brief Explanation (if needed)
-                Optional brief explanation of the answer, if relevant.
+                ## Explanation
+                {Provide a clear explanation of the answer, including any relevant context or background information}
                 
-                ## Additional Context (if applicable)
-                Any relevant context or related information, if appropriate.
-                """.strip()
+                ## Additional Context
+                {Include any relevant additional information, examples, or related concepts that help understand the answer better}
+                
+                ## Opinion
+                {A brief, 1-2 sentence opinion on the topic and the sources used}
+                """
             
             return decision, explanation, search_queries, report_structure
         except Exception as e:
@@ -1164,21 +1272,37 @@ class DeepResearchAgent:
                 
                 Follow this custom report structure and guidelines:
                 {report_structure}
-                Include an "Opinion" section at the end of the report. This should focus on your views on the topic and the sources used to form those views.
-                The report should be long and detailed, and should include all the information from the sources used.
-                Contradictions in sources should be noted and explained, and the report should provide a conclusion that takes into account the contradictions.
                 
-                Markdown Formatting Guidelines:
-                - Use section headers with #, ##, and ###
+                For simple queries (mathematical, factual, or definitional):
+                - Keep the title professional but concise (e.g., "Mathematical Analysis: Sum of 2 and 2")
+                - Use # for the main title
+                - Use ## for main sections
+                - Use ### for subsections if needed
+                - Provide a clear, direct answer
+                - Include a brief explanation of the concept if relevant
+                - Keep additional context minimal and focused
+                
+                For complex queries:
+                - Create a detailed, academic-style title with # heading
+                - Use ## for main sections
+                - Use ### for subsections
+                - Use #### for detailed subsection breakdowns where needed
+                - Include comprehensive analysis of all relevant information
+                - Address any contradictions or nuances in the sources
+                - Provide thorough explanations and context
+                
+                General Guidelines:
+                - The report should be detailed and include all relevant information from sources
+                - Always use proper heading hierarchy (# → ## → ### → ####)
                 - Use **bold** for emphasis on key points
                 - Format numbers naturally with proper thousands separators
-                - DO NOT place references in the form [1, 2, 3, 4, 5, 6, 9]. Always do [1][2][3] etc.
-                - You can use your own knowledge to add additional information to the report, however you must say when you have done so and mention that you might hallucinate. Be sure to mention when and where you have used your own knowledge!
-                - You can use LaTeX formatting. ALWAYS wrap mathematical equations in $$ for display math or $ for inline math. DO NOT use HTML formatting, like <sup> or <sub>. Use LaTeX equivalents like ^{2} for superscript and _{2} for subscript.
+                - Use [1][2][3] format for references, not [1, 2, 3]
+                - Mention when using knowledge beyond the sources and note potential for hallucination
+                - Use LaTeX for equations ($$ for display math, $ for inline math)
+                - Use LaTeX for superscript/subscript (^{2}, _{2}). DO NOT use HTML formatting, like <sup> or <sub>.
                 
-                Start the report immediately after this prompt without any additional formatting or preamble.
-                Format in clean Markdown without code blocks (unless for code snippets).
-                
+                Start the report immediately without any additional formatting or preamble.
+                Format in clean Markdown without code blocks (unless showing code snippets).
                 DO NOT include a sources section - it will be added automatically."""
                 
                 # Generate response
@@ -1443,7 +1567,16 @@ class DeepResearchAgent:
         self.logger.info("Generating final report with streaming...")
         report_generator, sources_used = await self.generate_report(
             query, research_data, latest_report_structure or """
-            # Research Report: {query}
+            # {A professional title based on the query, following academic style}
+            
+            ## Direct Answer
+            {Provide the direct, factual answer to the query}
+            
+            ## Explanation
+            {Provide a clear explanation of the answer, including any relevant context or background information}
+            
+            ## Additional Context
+            {Include any relevant additional information, examples, or related concepts that help understand the answer better}
             """
         )
         
@@ -1456,6 +1589,78 @@ class DeepResearchAgent:
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
+
+    def get_youtube_video_id(self, url: str) -> Optional[str]:
+        """Extract YouTube video ID from various URL formats."""
+        # First check if it's actually a video URL
+        if not self.is_youtube_url(url):
+            return None
+            
+        patterns = [
+            r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([^&\n?#]+)',
+            r'youtube\.com\/shorts\/([^&\n?#]+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    async def get_youtube_transcript(self, url: str) -> Optional[str]:
+        """Get transcript from YouTube video."""
+        try:
+            video_id = self.get_youtube_video_id(url)
+            if not video_id:
+                self.logger.warning(f"Could not extract video ID from URL: {url}")
+                return None
+
+            # Get available transcripts
+            transcript_list = await asyncio.to_thread(
+                YouTubeTranscriptApi.list_transcripts,
+                video_id
+            )
+
+            # Try to get English transcript (manual or auto-generated)
+            try:
+                transcript = await asyncio.to_thread(
+                    transcript_list.find_transcript,
+                    ['en']
+                )
+            except:
+                # If no English transcript, try to get any transcript and translate it
+                try:
+                    transcript = await asyncio.to_thread(
+                        transcript_list.find_manually_created_transcript
+                    )
+                    transcript = await asyncio.to_thread(
+                        transcript.translate,
+                        'en'
+                    )
+                except:
+                    # If no manual transcript, try auto-generated
+                    try:
+                        transcript = await asyncio.to_thread(
+                            transcript_list.find_generated_transcript
+                        )
+                        if transcript.language_code != 'en':
+                            transcript = await asyncio.to_thread(
+                                transcript.translate,
+                                'en'
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"No transcript available for video {video_id}: {str(e)}")
+                        return None
+
+            # Get transcript data and format it
+            transcript_data = await asyncio.to_thread(transcript.fetch)
+            formatted_transcript = self.transcript_formatter.format_transcript(transcript_data)
+            
+            return formatted_transcript
+
+        except Exception as e:
+            self.logger.warning(f"Error getting transcript for {url}: {str(e)}")
+            return None
 
 def main():
     """Run the research agent with proper async handling."""
