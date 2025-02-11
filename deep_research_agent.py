@@ -1298,8 +1298,13 @@ class DeepResearchAgent:
                 - Format numbers naturally with proper thousands separators
                 - Use [1][2][3] format for references, not [1, 2, 3]
                 - Mention when using knowledge beyond the sources and note potential for hallucination
-                - Use LaTeX for equations ($$ for display math, $ for inline math)
-                - Use LaTeX for superscript/subscript (^{2}, _{2}). DO NOT use HTML formatting, like <sup> or <sub>.
+                - Use LaTeX for ALL math expressions by wrapping them in $$. Examples:
+                  - For inline math: $$x^2$$ or $$x_2$$
+                  - For display math on its own line:
+                    $$
+                    x^2 + y^2 = z^2
+                    $$
+                - DO NOT use single $ for math. DO NOT use HTML formatting like <sup> or <sub>.
                 
                 Start the report immediately without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless showing code snippets).
