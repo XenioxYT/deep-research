@@ -172,6 +172,24 @@ const StyledMarkdown = styled(Box)(({ theme }) => ({
       borderRadius: theme.shape.borderRadius,
       margin: theme.spacing(2, 0),
     },
+    
+    '& .katex-display': {
+      margin: theme.spacing(2, 0),
+      overflow: 'auto',
+      '& > .katex': {
+        maxWidth: '100%',
+      }
+    },
+    
+    '& .katex': {
+      fontSize: '1.1em',
+      fontFamily: 'KaTeX_Math',
+      whiteSpace: 'nowrap',
+    },
+    
+    '& .katex-html': {
+      whiteSpace: 'nowrap',
+    }
   },
 }));
 
@@ -385,7 +403,10 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
           <StyledMarkdown>
             <ReactMarkdown
               className="markdown-body"
-              remarkPlugins={[remarkGfm, remarkMath]}
+              remarkPlugins={[
+                remarkGfm,
+                [remarkMath, { inlineMath: [], displayMath: [['$$', '$$']] }]
+              ]}
               rehypePlugins={[rehypeKatex]}
               components={components}
             >
