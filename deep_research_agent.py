@@ -286,7 +286,7 @@ class DeepResearchAgent:
         """Generate sub-queries using AI to explore different aspects of the main query."""
         self.logger.info("Analyzing query and generating search queries...")
         
-        MAX_QUERIES = 15  # Maximum number of queries to return
+        MAX_QUERIES = 10  # Maximum number of queries to return
         
         context = ""
         if research_state and self.previous_queries:
@@ -350,12 +350,7 @@ class DeepResearchAgent:
         7. "remote work" environmental impact data
         8. distributed teams collaboration best practices
         9. "remote work" industry adoption rates
-        10. future "workplace trends" expert predictions
-        11. "remote work" cost savings analysis
-        12. site:linkedin.com remote work success stories
-        13. "distributed teams" management strategies
-        14. remote work technology infrastructure requirements
-        15. "work from home" impact on cities"""
+        10. future "workplace trends" expert predictions"""
 
         try:
             response = self.model.generate_content(prompt)
@@ -1296,7 +1291,7 @@ class DeepResearchAgent:
                 - Always use proper heading hierarchy (# → ## → ### → ####)
                 - Use **bold** for emphasis on key points
                 - Format numbers naturally with proper thousands separators
-                - Use [1][2][3] format for references, not [1, 2, 3]
+                - Use [1][2][3] format for references, NOT [1, 2, 3].
                 - Mention when using knowledge beyond the sources and note potential for hallucination
                 - Use LaTeX for ALL math expressions by wrapping them in $$. Examples:
                   - For inline math: $$x^2$$ or $$x_2$$
