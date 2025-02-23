@@ -217,6 +217,70 @@ const SourceCard = styled(Card)(({ theme }) => ({
   boxShadow: theme.shadows[10],
 }));
 
+const SourceBadge = styled(Box)(({ theme }) => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  minWidth: '20px',
+  height: '20px',
+  padding: '0 4px',
+  backgroundColor: 'rgba(187, 134, 252, 0.1)',
+  border: `1px solid ${theme.palette.primary.main}`,
+  borderRadius: '4px',
+  color: theme.palette.primary.main,
+  cursor: 'pointer',
+  fontSize: '0.75rem',
+  fontWeight: 500,
+  textAlign: 'center',
+  transition: theme.transitions.create(['background-color', 'border-color', 'color'], {
+    duration: theme.transitions.duration.shortest,
+  }),
+  '&:hover': {
+    backgroundColor: theme.palette.primary.main,
+    color: theme.palette.common.white,
+  },
+  '&:active': {
+    transform: 'scale(0.95)',
+  },
+}));
+
+const SourceBadgeWrapper = ({ source, children }: { source: Source, children: React.ReactNode }) => {
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (source.url) {
+      window.open(source.url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  return (
+    <SourceTooltip
+      title={
+        <SourceCard>
+          <CardContent>
+            <Typography variant="subtitle1" gutterBottom>
+              {source.title}
+            </Typography>
+            {source.domain && (
+              <Typography variant="body2" color="text.secondary">
+                Domain: {source.domain}
+              </Typography>
+            )}
+            <Typography variant="body2" color="text.secondary">
+              Relevance Score: {source.score.toFixed(2)}
+            </Typography>
+          </CardContent>
+        </SourceCard>
+      }
+      placement="top"
+      arrow
+    >
+      <SourceBadge component="span" onClick={handleClick}>
+        {children}
+      </SourceBadge>
+    </SourceTooltip>
+  );
+};
+
 const ResearchReport = ({ content }: ResearchReportProps) => {
   const theme = useTheme();
 
@@ -346,12 +410,46 @@ const ResearchReport = ({ content }: ResearchReportProps) => {
   const processChildren = (children: any, renderTooltip: RenderSourceTooltipFn) => {
     return React.Children.map(children, (child) => {
       if (typeof child === 'string') {
-        const parts = child.split(/(\[\d+\])/g);
+        const parts = child.split(/(\[\d+(?:\s*,\s*\d+)*\])/g);
         return parts.map((part, i) => {
-          const sourceMatch = part.match(/\[(\d+)\]/);
+          const sourceMatch = part.match(/\[(\d+(?:\s*,\s*\d+)*)\]/);
           if (sourceMatch) {
-            const element = renderTooltip(part);
-            return element ? <React.Fragment key={i}>{element}</React.Fragment> : part;
+            const numbers = sourceMatch[1].split(/\s*,\s*/).map(num => num.trim());
+            if (numbers.length === 1) {
+              const source = sources.get(`[${numbers[0]}]`);
+              if (!source) return numbers[0];
+              
+              return (
+                <SourceBadgeWrapper key={i} source={source}>
+                  {numbers[0]}
+                </SourceBadgeWrapper>
+              );
+            }
+            return (
+              <Box
+                key={i}
+                component="span"
+                sx={{ 
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 0.5,
+                }}
+              >
+                {numbers.map((num, index) => {
+                  const source = sources.get(`[${num}]`);
+                  if (!source) return num;
+                  
+                  return (
+                    <React.Fragment key={num}>
+                      {index > 0 && ', '}
+                      <SourceBadgeWrapper source={source}>
+                        {num}
+                      </SourceBadgeWrapper>
+                    </React.Fragment>
+                  );
+                })}
+              </Box>
+            );
           }
           return part;
         });
