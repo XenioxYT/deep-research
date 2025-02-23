@@ -23,11 +23,11 @@ class MockSearchEngine:
     def __init__(self):
         pass
         
-    def list(self, q: str, cx: str, num: int = 8) -> 'MockSearchResponse':
+    def list(self, q: str, cx: str, num: int = 15) -> 'MockSearchResponse':
         """Mimic CSE list method"""
         try:
             # Use a generator to safely get results
-            results_generator = search(q, advanced=True, num_results=num, safe="none")
+            results_generator = search(q, advanced=True, num_results=8, safe="none")
             results = []
             
             # Safely iterate through generator

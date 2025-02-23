@@ -3,8 +3,6 @@ import json
 from typing import List, Dict, Optional, Set, Tuple
 import google.generativeai as genai
 from test_search import build
-import requests
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import time
 from collections import defaultdict
@@ -12,17 +10,11 @@ import logging
 import colorlog
 from datetime import datetime
 import re
-from urllib.parse import urlparse
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import aiohttp
-from functools import partial
 import httplib2
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from vertexai.preview import tokenization
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.formatters import TextFormatter
+from utils.browsing import BrowserManager
 
 class DeepResearchAgent:
     def __init__(self):
@@ -66,7 +58,7 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-pro-exp-02-05',
+            'gemini-2.0-flash-exp',
             safety_settings=self.safety_settings
         )  # Model for final report generation
         
@@ -84,7 +76,7 @@ class DeepResearchAgent:
         self.blacklisted_urls = set()
         self.scraped_urls = set()  # Track already scraped URLs
         self.research_iterations = 0
-        self.MAX_ITERATIONS = 9
+        self.MAX_ITERATIONS = 5
         self.system_context = system_context
         self.total_tokens = 0  # Track total tokens used
         
@@ -94,110 +86,18 @@ class DeepResearchAgent:
         self.token_usage_by_operation = defaultdict(int)
         self.content_tokens = 0  # Track tokens from stored content separately
         
-        # Initialize YouTube transcript formatter
-        self.transcript_formatter = TextFormatter()
+        # Initialize browser manager
+        self.browser_manager = None
 
     async def __aenter__(self):
         """Async initialization when entering context."""
-        await self.initialize()
+        self.browser_manager = await BrowserManager().__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup when exiting context."""
-        await self.cleanup()
-
-    async def cleanup(self):
-        """Cleanup resources."""
-        if hasattr(self, 'context'):
-            await self.context.close()
-        if hasattr(self, 'browser'):
-            await self.browser.close()
-        if hasattr(self, 'playwright'):
-            await self.playwright.stop()
-
-    async def initialize(self):
-        """Initialize async resources."""
-        # Initialize playwright with enhanced stealth mode
-        self.playwright = await async_playwright().start()
-        
-        # Enhanced browser launch options
-        browser_args = [
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--disable-gpu',
-            '--window-size=1920,1080',
-            '--enable-javascript',
-            '--accept-cookies'
-        ]
-        
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=browser_args
-        )
-        
-        # Enhanced context options
-        context_options = {
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-            'viewport': {'width': 1920, 'height': 1080},
-            'device_scale_factor': 1,
-            'has_touch': False,
-            'is_mobile': False,
-            'java_script_enabled': True,
-            'bypass_csp': True,
-            'ignore_https_errors': True,
-            'accept_downloads': True,
-            'extra_http_headers': {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'DNT': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cookie': 'cookieconsent_status=allow'
-            }
-        }
-        
-        self.context = await self.browser.new_context(**context_options)
-        
-        # Enhanced stealth scripts
-        await self.context.add_init_script("""
-            // Override common detection methods
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5].map(() => ({length: 0}))});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-            Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-            
-            // Add Chrome runtime
-            window.chrome = {
-                runtime: {},
-                app: {},
-                csi: () => {},
-                loadTimes: () => {}
-            };
-            
-            // Override permissions
-            const originalQuery = window.navigator.permissions.query;
-            window.navigator.permissions.query = (parameters) => (
-                parameters.name === 'notifications' ?
-                Promise.resolve({state: Notification.permission}) :
-                originalQuery(parameters)
-            );
-            
-            // Add missing browser features
-            window.Notification = window.Notification || {};
-            window.Notification.permission = 'denied';
-            
-            // Prevent iframe detection
-            Object.defineProperty(window, 'parent', {get: () => window});
-            Object.defineProperty(window, 'top', {get: () => window});
-        """)
+        if self.browser_manager:
+            await self.browser_manager.__aexit__(exc_type, exc_val, exc_tb)
 
     def setup_logging(self):
         """Setup colorized logging."""
@@ -218,63 +118,6 @@ class DeepResearchAgent:
         logger.setLevel(logging.DEBUG)
         self.logger = logger
 
-    def is_youtube_url(self, url: str) -> bool:
-        """Check if URL is a YouTube video (not channel/user/playlist)."""
-        if not any(yt in urlparse(url).netloc for yt in ['youtube.com', 'youtu.be']):
-            return False
-            
-        # Check if it's a video URL by looking for specific patterns
-        video_patterns = [
-            r'youtube\.com/watch\?v=',  # Standard video URL
-            r'youtu\.be/',             # Short URL
-            r'youtube\.com/embed/',     # Embedded video
-            r'youtube\.com/v/',         # Old style video URL
-            r'youtube\.com/shorts/'     # YouTube shorts
-        ]
-        
-        # Return True only if it matches a video pattern
-        return any(re.search(pattern, url) for pattern in video_patterns)
-
-    def rewrite_url(self, url: str) -> str:
-        """Rewrite URLs based on defined rules to use alternative frontends."""
-        parsed = urlparse(url)
-        
-        # Dictionary of domain rewrites for better scraping
-        rewrites = {
-            # Social media
-            'twitter.com': 'nitter.net',
-            'x.com': 'nitter.net',
-            'reddit.com': 'redlib.kylrth.com',
-            'instagram.com': 'imginn.com',
-            
-            # News and articles
-            'medium.com': 'scribe.rip',
-            'bloomberg.com': 'archive.ph',
-            'wsj.com': 'archive.ph',
-            'nytimes.com': 'archive.ph',
-            'ft.com': 'archive.ph',
-        }
-        
-        # Extract domain without subdomain
-        domain = '.'.join(parsed.netloc.split('.')[-2:])
-        
-        # Check if domain needs rewriting
-        if domain in rewrites:
-            new_domain = rewrites[domain]
-            
-            # Special handling for archive.ph (needs full URL encoded)
-            if new_domain == 'archive.ph':
-                return f'https://archive.ph/{url}'
-            
-            # For all other rewrites, maintain the path and query
-            new_url = url.replace(parsed.netloc, new_domain)
-            
-            # Log the rewrite
-            self.logger.info(f"Rewriting URL: {url} -> {new_url}")
-            return new_url
-            
-        return url
-
     def should_skip_url(self, url: str) -> bool:
         """Check if URL should be skipped."""
         return (
@@ -286,7 +129,7 @@ class DeepResearchAgent:
         """Generate sub-queries using AI to explore different aspects of the main query."""
         self.logger.info("Analyzing query and generating search queries...")
         
-        MAX_QUERIES = 10  # Maximum number of queries to return
+        MAX_QUERIES = 5  # Maximum number of queries to return
         
         context = ""
         if research_state and self.previous_queries:
@@ -318,13 +161,11 @@ class DeepResearchAgent:
            - Impacts and implications
 
         3. Use search optimization techniques:
-           - Exact phrase matches in quotes
            - Site-specific searches (e.g., site:edu, site:gov)
            - Date-range specific queries when relevant
            - Include synonyms and related terms
            - Combine key concepts in different ways
            - Use both broad and specific queries
-           - Target authoritative sources
 
         4. Response Format:
         TYPE: [SIMPLE/COMPLEX]
@@ -333,11 +174,6 @@ class DeepResearchAgent:
         [If SIMPLE: Only output the original query
         If COMPLEX: Generate up to {MAX_QUERIES} search queries that:
         - Start each line with a number
-        - Include exact phrases in quotes when relevant
-        - Use site: operators for authoritative sources
-        - Combine terms to target specific aspects
-        - Avoid redundant queries
-        - Focus on the most important aspects first
         - Ensure broad coverage within the {MAX_QUERIES} query limit]
 
         Example of a COMPLEX query about "impact of remote work":
@@ -457,6 +293,9 @@ class DeepResearchAgent:
                                     if not url or self.should_skip_url(url):
                                         continue
                                         
+                                    # Use browser manager's rewrite_url
+                                    url = self.browser_manager.rewrite_url(url)
+                                    
                                     result = {
                                         'title': item.get('title', ''),
                                         'url': url,
@@ -506,274 +345,6 @@ class DeepResearchAgent:
         self.logger.info(f"Found {len(all_results)} unique results across all queries")
         return all_results
 
-    async def extract_content_with_retry(self, url: str, max_retries: int = 2) -> str:
-        """Extract content from a webpage with simplified retry logic."""
-        self.logger.info(f"Extracting content: {url}")
-        
-        for attempt in range(max_retries):
-            page = None
-            try:
-                page = await self.context.new_page()
-                
-                # Try to load the page
-                try:
-                    response = await page.goto(
-                        url, 
-                        wait_until='domcontentloaded',
-                        timeout=15000  # Increased timeout
-                    )
-                    
-                    if not response.ok:
-                        self.logger.warning(f"HTTP {response.status} for {url}")
-                        return ""
-                        
-                except PlaywrightTimeout:
-                    self.logger.warning(f"Timeout loading {url}")
-                    return ""
-                
-                # Enhanced content extraction with better text handling
-                content = await page.evaluate("""
-                    () => {
-                        // Helper function to clean text
-                        const cleanText = (text) => {
-                            return text.replace(/\\s+/g, ' ').trim();
-                        };
-                        
-                        // Helper to check if element is visible
-                        const isVisible = (elem) => {
-                            const style = window.getComputedStyle(elem);
-                            return style.display !== 'none' && 
-                                   style.visibility !== 'hidden' && 
-                                   style.opacity !== '0' &&
-                                   elem.offsetWidth > 0 &&
-                                   elem.offsetHeight > 0;
-                        };
-                        
-                        // Get all meaningful content
-                        const contentSections = [];
-                        
-                        // Try to get main content first
-                        const mainContent = document.querySelector('article, [role="main"], main, .content, .post');
-                        if (mainContent && isVisible(mainContent)) {
-                            const text = cleanText(mainContent.innerText);
-                            if (text.length >= 100) {
-                                contentSections.push(text);
-                            }
-                        }
-                        
-                        // Get content from all meaningful elements
-                        const elements = document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, th, div:not(:empty)');
-                        
-                        elements.forEach(elem => {
-                            // Skip if element is hidden or part of navigation/footer/etc
-                            if (!isVisible(elem) || elem.closest('nav, footer, header, aside, .menu, .navigation')) {
-                                return;
-                            }
-                            
-                            // Skip elements with too many links (likely navigation)
-                            if (elem.querySelectorAll('a').length > elem.textContent.split(' ').length / 3) {
-                                return;
-                            }
-                            
-                            const text = cleanText(elem.innerText);
-                            // Only add if text is meaningful
-                            if (text.length >= 20 || (text.includes(' ') && text.length >= 10)) {
-                                contentSections.push(text);
-                            }
-                        });
-                        
-                        // Join all content with proper spacing
-                        return contentSections.join('\\n\\n');
-                    }
-                """)
-                
-                if content:
-                    # Clean content server-side as well
-                    content = re.sub(r'\s+', ' ', content).strip()
-                    content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
-                    
-                    if len(content) >= 100:  # Only return if we got meaningful content
-                        return content
-                
-                return ""
-                
-            except Exception as e:
-                self.logger.warning(f"Extraction error for {url}: {str(e)}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)  # Wait before retry
-                return ""
-            finally:
-                if page:
-                    try:
-                        await page.close()
-                    except:
-                        pass
-        
-        return ""
-
-    async def batch_extract_content(self, urls: List[str], max_concurrent: int = 8) -> Dict[str, str]:
-        """Extract content from multiple URLs in parallel with enhanced concurrency."""
-        self.logger.info(f"Extracting content from {len(urls)} URLs")
-        
-        # Create semaphore for concurrency control
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        # Create a pool of browser pages
-        page_pool = []
-        for _ in range(max_concurrent):
-            page = await self.context.new_page()
-            page_pool.append(page)
-        
-        async def extract_with_page_pool(url: str) -> Tuple[str, str]:
-            """Extract content using a page from the pool."""
-            async with semaphore:
-                # Check if it's a YouTube URL
-                if self.is_youtube_url(url):
-                    transcript = await self.get_youtube_transcript(url)
-                    if transcript:
-                        return url, transcript
-                    return url, ""
-
-                page = None
-                try:
-                    # Get a page from the pool
-                    page = page_pool.pop()
-                    
-                    # Enhanced stealth settings per page
-                    await page.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-                    """)
-                    
-                    # Configure page timeouts
-                    page.set_default_navigation_timeout(20000)
-                    page.set_default_timeout(5000)
-                    
-                    # Try to load the page with retry logic
-                    content = ""
-                    max_retries = 1
-                    base_delay = 1
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            # Navigate with enhanced options
-                            response = await page.goto(
-                                url,
-                                wait_until='domcontentloaded',
-                                timeout=5000
-                            )
-                            
-                            if not response or not response.ok:
-                                if attempt < max_retries - 1:
-                                    delay = base_delay * (2 ** attempt)
-                                    await asyncio.sleep(delay)
-                                    continue
-                                return url, ""
-                            
-                            # Wait for content to be available
-                            await page.wait_for_selector('body', timeout=5000)
-                            
-                            # Enhanced content extraction with better text handling
-                            content = await page.evaluate("""
-                                () => {
-                                    // Helper to clean text
-                                    const cleanText = (text) => {
-                                        return text.replace(/\\s+/g, ' ').trim();
-                                    };
-                                    
-                                    // Helper to check visibility
-                                    const isVisible = (elem) => {
-                                        const style = window.getComputedStyle(elem);
-                                        return style.display !== 'none' && 
-                                               style.visibility !== 'hidden' && 
-                                               style.opacity !== '0' &&
-                                               elem.offsetWidth > 0 &&
-                                               elem.offsetHeight > 0;
-                                    };
-                                    
-                                    // Get main content first
-                                    const contentSections = new Set();
-                                    const mainContent = document.querySelector('article, [role="main"], main, .content, .post');
-                                    if (mainContent && isVisible(mainContent)) {
-                                        contentSections.add(cleanText(mainContent.innerText));
-                                    }
-                                    
-                                    // Get content from meaningful elements
-                                    const elements = document.querySelectorAll(
-                                        'p, h1, h2, h3, h4, h5, h6, li, td, th, div:not(:empty)'
-                                    );
-                                    
-                                    elements.forEach(elem => {
-                                        if (!isVisible(elem) || 
-                                            elem.closest('nav, footer, header, aside, .menu, .navigation')) {
-                                            return;
-                                        }
-                                        
-                                        // Skip elements with too many links
-                                        if (elem.querySelectorAll('a').length > 
-                                            elem.textContent.split(' ').length / 3) {
-                                            return;
-                                        }
-                                        
-                                        const text = cleanText(elem.innerText);
-                                        if (text.length >= 20 || (text.includes(' ') && text.length >= 10)) {
-                                            contentSections.add(text);
-                                        }
-                                    });
-                                    
-                                    return Array.from(contentSections).join('\\n\\n');
-                                }
-                            """)
-                            
-                            if content:
-                                # Clean content server-side
-                                content = re.sub(r'\s+', ' ', content).strip()
-                                content = re.sub(r'\n\s*\n\s*\n+', '\n\n', content)
-                                break
-                                
-                        except PlaywrightTimeout:
-                            if attempt < max_retries - 1:
-                                delay = base_delay * (2 ** attempt)
-                                await asyncio.sleep(delay)
-                                continue
-                            return url, ""
-                            
-                        except Exception as e:
-                            self.logger.warning(f"Extraction error for {url} (attempt {attempt + 1}): {str(e)}")
-                            if attempt < max_retries - 1:
-                                delay = base_delay * (2 ** attempt)
-                                await asyncio.sleep(delay)
-                                continue
-                            return url, ""
-                            
-                finally:
-                    if page:
-                        # Return page to pool
-                        page_pool.append(page)
-                
-                return url, content
-        
-        try:
-            # Process URLs in parallel
-            tasks = [extract_with_page_pool(url) for url in urls]
-            results = await asyncio.gather(*tasks)
-            
-            # Clean up page pool
-            for page in page_pool:
-                await page.close()
-            
-            return dict(results)
-            
-        except Exception as e:
-            self.logger.error(f"Batch extraction error: {e}")
-            # Clean up page pool on error
-            for page in page_pool:
-                try:
-                    await page.close()
-                except:
-                    pass
-            return {}
 
     def rank_new_results(self, main_query: str, new_results: List[Dict]) -> List[Dict]:
         """Rank only new search results based on relevance using AI."""
@@ -788,7 +359,7 @@ class DeepResearchAgent:
         1. Relevance score (0-0.99, or 1.0 for perfect matches)
         2. Whether to scrape the content (YES/NO)
         3. Scraping level (LOW/MEDIUM/HIGH) - determines how much content to extract:
-           - LOW: 300 chars - For basic/overview content (default)
+           - LOW: 3000 chars - For basic/overview content (default)
            - MEDIUM: 6000 chars - For moderate detail
            - HIGH: 10000 chars - For in-depth analysis
         
@@ -836,7 +407,7 @@ class DeepResearchAgent:
                     rankings[url] = score
                     
                     # Only mark for scraping if we haven't hit our limit
-                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 10
+                    should_scrape = scrape_decision.upper() == 'YES' and scrape_count < 5
                     if should_scrape:
                         scrape_count += 1
                     
@@ -892,9 +463,9 @@ class DeepResearchAgent:
     def get_scrape_limit(self, scrape_level: str) -> int:
         """Get character limit based on scraping level."""
         limits = {
-            'LOW': 3000,
-            'MEDIUM': 6000,
-            'HIGH': 10000
+            'LOW': 1500,
+            'MEDIUM': 3000,
+            'HIGH': 6000
         }
         return limits.get(scrape_level.upper(), 3000)  # Default to LOW if invalid
 
@@ -929,6 +500,7 @@ class DeepResearchAgent:
            - On iteration 0-2: Say YES if significant information is missing
            - On iteration 3: Only say YES if crucial information is missing
            - On iteration 4+: Strongly lean towards NO unless absolutely critical information is missing
+           - If a section called "Further Research" can be written, continue research.
         3. Consider the query ANSWERED when you have:
            - Sufficient high-quality sources (relevance_score > 0.6)
            - Enough information to provide a comprehensive answer
@@ -953,24 +525,8 @@ class DeepResearchAgent:
         REMOVE_URLS: [List URLs to remove from context, one per line, with brief reason after # symbol]
         BLACKLIST: [List URLs to blacklist, one per line. These URLs will be ignored in future iterations.]
         MISSING: [List missing information aspects, one per line]
-        SEARCH_QUERIES: [List complete search queries, one per line, max 10. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
-        SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]
-        REPORT_STRUCTURE: [A complete, customized report structure and guidelines based on the query type and findings. This should include:
-        1. Title of the report - Transform the query into a professional academic/research title:
-           - Capitalize important words
-           - Remove question marks and informal language
-           - Add relevant context from findings
-           - Format as a research paper title
-           Examples:
-           Query: "how does ai impact healthcare" → "The Impact of Artificial Intelligence on Modern Healthcare Systems"
-           Query: "what are the effects of climate change" → "Analysis of Climate Change Effects: Global Environmental Impact Assessment"
-           Query: "compare tesla and ford" → "Comparative Analysis of Tesla and Ford: Manufacturing, Innovation, and Market Position"
-        2. Required sections and their order (Do not include an introduction section)
-        3. What to include in each section
-        4. Specific formatting guidelines
-        5. Try to include a table or information where relevant
-        6. Any special considerations for this topic
-        The structure should be tailored to the specific query type (e.g., product analysis, historical research, current events, etc.)]"""
+        SEARCH_QUERIES: [List complete search queries, one per line, max 7. Search formatting and quotes are allowed. These queries should be specific to the information you are looking for.]
+        SCRAPE_NEXT: [List URLs to scrape in next iteration, one per line, in format: URL | LOW/MEDIUM/HIGH]"""
         
         try:
             response = self.analysis_model.generate_content(prompt)
@@ -981,7 +537,6 @@ class DeepResearchAgent:
             blacklist = []
             missing = []
             search_queries = []
-            report_structure = ""
             urls_to_scrape_next = {}
             urls_to_remove = {}
             current_section = None
@@ -1089,25 +644,7 @@ class DeepResearchAgent:
             if urls_to_scrape_next:
                 explanation += f"\nMarked {len(urls_to_scrape_next)} URLs for next scraping"
             
-            # For simple queries, ensure we have a report structure
-            if query_type == "SIMPLE" and not report_structure:
-                report_structure = """
-                # {A professional title based on the query, following academic style}
-                
-                ## Direct Answer
-                {Provide the direct, factual answer to the query}
-                
-                ## Explanation
-                {Provide a clear explanation of the answer, including any relevant context or background information}
-                
-                ## Additional Context
-                {Include any relevant additional information, examples, or related concepts that help understand the answer better}
-                
-                ## Opinion
-                {A brief, 1-2 sentence opinion on the topic and the sources used}
-                """
-            
-            return decision, explanation, search_queries, report_structure
+            return decision, explanation, search_queries, ""
         except Exception as e:
             self.logger.error(f"Analysis error: {e}")
             return False, str(e), [], ""
@@ -1262,36 +799,30 @@ class DeepResearchAgent:
                 }
                 
                 prompt = f"""Generate a comprehensive research report on: '{main_query}'
-                Using the following information:
-                {json.dumps(report_context, indent=2)}
-                
-                Follow this custom report structure and guidelines:
-                {report_structure}
-                
-                For simple queries (mathematical, factual, or definitional):
-                - Keep the title professional but concise (e.g., "Mathematical Analysis: Sum of 2 and 2")
+
+                # For simple queries (mathematical, factual, or definitional):
                 - Use # for the main title
                 - Use ## for main sections
                 - Use ### for subsections if needed
                 - Provide a clear, direct answer
                 - Include a brief explanation of the concept if relevant
                 - Keep additional context minimal and focused
-                
-                For complex queries:
-                - Create a detailed, academic-style title with # heading
+
+                # For complex queries:
+                - Create a title with # heading
                 - Use ## for main sections
                 - Use ### for subsections
                 - Use #### for detailed subsection breakdowns where needed
                 - Include comprehensive analysis of all relevant information
                 - Address any contradictions or nuances in the sources
                 - Provide thorough explanations and context
-                
-                General Guidelines:
+
+                # General Guidelines:
                 - The report should be detailed and include all relevant information from sources
                 - Always use proper heading hierarchy (# → ## → ### → ####)
                 - Use **bold** for emphasis on key points
                 - Format numbers naturally with proper thousands separators
-                - Use [1][2][3] format for references, NOT [1, 2, 3].
+                ## Use [1][2][3] format for references, DO NOT DO [1, 2, 3].
                 - Mention when using knowledge beyond the sources and note potential for hallucination
                 - Use LaTeX for ALL math expressions by wrapping them in $$. Examples:
                   - For inline math: $$x^2$$ or $$x_2$$
@@ -1301,20 +832,45 @@ class DeepResearchAgent:
                     $$
                 - DO NOT use single $ for math. DO NOT use HTML formatting like <sup> or <sub>.
                 
+                # The report should be comprehensive and thorough:
+                - Aim for a length of at least 16,000 words to ensure complete coverage
+                - Include extensive analysis and discussion of all relevant aspects
+                - Break down complex topics into detailed subsections
+                - Provide rich examples and case studies where applicable
+                - Explore historical context, current state, and future implications
+                - Address multiple perspectives and viewpoints
+                - Support all claims with evidence from the sources
+                - Use clear topic transitions and maintain logical flow
+                - Ensure proper citation of sources throughout
+                - Provide tables if relevant.
+                
                 Start the report immediately without any additional formatting or preamble.
                 Format in clean Markdown without code blocks (unless showing code snippets).
-                DO NOT include a sources section - it will be added automatically."""
+                DO NOT include a sources section - it will be added automatically.
+                
+                Using the following information:
+                {json.dumps(report_context, indent=2)}"""
+                
+                # Save prompt to text file with current date and time
+                # Create directory if it doesn't exist
+                os.makedirs("prompts", exist_ok=True)
+                
+                # Create file
+                prompt_file = f"prompts/prompt-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+                with open(prompt_file, "w") as f:
+                    f.write(prompt)
                 
                 # Generate response
                 response = self.report_model.generate_content(
                     prompt,
                     generation_config={
-                        'temperature': 0.7,
-                        'top_p': 0.9,
+                        'temperature': 1,
                         'max_output_tokens': 8192,
                     },
                     safety_settings=self.safety_settings
                 )
+                
+                print(response)
                 
                 # Check for prompt feedback and blocking
                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
@@ -1352,9 +908,6 @@ class DeepResearchAgent:
             'iterations': [],
             'final_sources': []
         }
-        
-        # Store the latest report structure
-        latest_report_structure = ""
         
         while self.research_iterations < self.MAX_ITERATIONS:
             # Combine iteration logs
@@ -1396,7 +949,7 @@ class DeepResearchAgent:
                 
                 async def process_result(result):
                     url = result['url']
-                    rewritten_url = self.rewrite_url(url)
+                    rewritten_url = self.browser_manager.rewrite_url(url)
                     if rewritten_url not in seen_urls:
                         seen_urls.add(rewritten_url)
                         result['url'] = rewritten_url
@@ -1464,8 +1017,8 @@ class DeepResearchAgent:
                 # Create a set of unique URLs to scrape
                 urls_to_extract = {r['url'] for r in urls_to_scrape}
                 
-                # Parallel content extraction
-                contents = await self.batch_extract_content(list(urls_to_extract))
+                # Use browser manager for content extraction
+                contents = await self.browser_manager.batch_extract_content(list(urls_to_extract))
                 
                 # Process extracted content in parallel
                 async def process_content(result):
@@ -1475,7 +1028,7 @@ class DeepResearchAgent:
                         return None
                         
                     self.scraped_urls.add(url)
-                    rewritten_url = self.rewrite_url(url)
+                    rewritten_url = self.browser_manager.rewrite_url(url)
                     
                     # Remove individual content storage logs
                     if url == top_url:
@@ -1527,13 +1080,9 @@ class DeepResearchAgent:
             }
             
             # Analyze research state
-            need_more_research, explanation, new_queries, report_structure = self.analyze_research_state(
+            need_more_research, explanation, new_queries, _ = self.analyze_research_state(
                 query, analysis_context
             )
-            
-            if report_structure:
-                latest_report_structure = report_structure
-                self.logger.info("Updated report structure based on latest analysis")
             
             if need_more_research and self.research_iterations < self.MAX_ITERATIONS - 1:
                 self.logger.info(f"Continuing research - Iteration {self.research_iterations + 2}")
@@ -1566,18 +1115,7 @@ class DeepResearchAgent:
         # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
         report_generator, sources_used = await self.generate_report(
-            query, research_data, latest_report_structure or """
-            # {A professional title based on the query, following academic style}
-            
-            ## Direct Answer
-            {Provide the direct, factual answer to the query}
-            
-            ## Explanation
-            {Provide a clear explanation of the answer, including any relevant context or background information}
-            
-            ## Additional Context
-            {Include any relevant additional information, examples, or related concepts that help understand the answer better}
-            """
+            query, research_data, ""
         )
         
         if report_generator:
@@ -1589,78 +1127,6 @@ class DeepResearchAgent:
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
-
-    def get_youtube_video_id(self, url: str) -> Optional[str]:
-        """Extract YouTube video ID from various URL formats."""
-        # First check if it's actually a video URL
-        if not self.is_youtube_url(url):
-            return None
-            
-        patterns = [
-            r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/)([^&\n?#]+)',
-            r'youtube\.com\/shorts\/([^&\n?#]+)'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        return None
-
-    async def get_youtube_transcript(self, url: str) -> Optional[str]:
-        """Get transcript from YouTube video."""
-        try:
-            video_id = self.get_youtube_video_id(url)
-            if not video_id:
-                self.logger.warning(f"Could not extract video ID from URL: {url}")
-                return None
-
-            # Get available transcripts
-            transcript_list = await asyncio.to_thread(
-                YouTubeTranscriptApi.list_transcripts,
-                video_id
-            )
-
-            # Try to get English transcript (manual or auto-generated)
-            try:
-                transcript = await asyncio.to_thread(
-                    transcript_list.find_transcript,
-                    ['en']
-                )
-            except:
-                # If no English transcript, try to get any transcript and translate it
-                try:
-                    transcript = await asyncio.to_thread(
-                        transcript_list.find_manually_created_transcript
-                    )
-                    transcript = await asyncio.to_thread(
-                        transcript.translate,
-                        'en'
-                    )
-                except:
-                    # If no manual transcript, try auto-generated
-                    try:
-                        transcript = await asyncio.to_thread(
-                            transcript_list.find_generated_transcript
-                        )
-                        if transcript.language_code != 'en':
-                            transcript = await asyncio.to_thread(
-                                transcript.translate,
-                                'en'
-                            )
-                    except Exception as e:
-                        self.logger.warning(f"No transcript available for video {video_id}: {str(e)}")
-                        return None
-
-            # Get transcript data and format it
-            transcript_data = await asyncio.to_thread(transcript.fetch)
-            formatted_transcript = self.transcript_formatter.format_transcript(transcript_data)
-            
-            return formatted_transcript
-
-        except Exception as e:
-            self.logger.warning(f"Error getting transcript for {url}: {str(e)}")
-            return None
 
 def main():
     """Run the research agent with proper async handling."""
