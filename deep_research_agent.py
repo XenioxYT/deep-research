@@ -1032,7 +1032,7 @@ class DeepResearchAgent:
                     
                     # Remove individual content storage logs
                     if url == top_url:
-                        content_to_store = content[:10000]
+                        content_to_store = content[:20000]
                     else:
                         scrape_level = result.get('scrape_decision', {}).get('scrape_level', 'MEDIUM')
                         char_limit = self.get_scrape_limit(scrape_level)
