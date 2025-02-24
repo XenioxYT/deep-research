@@ -463,9 +463,9 @@ class DeepResearchAgent:
     def get_scrape_limit(self, scrape_level: str) -> int:
         """Get character limit based on scraping level."""
         limits = {
-            'LOW': 1500,
-            'MEDIUM': 3000,
-            'HIGH': 6000
+            'LOW': 3000,
+            'MEDIUM': 6000,
+            'HIGH': 10000
         }
         return limits.get(scrape_level.upper(), 3000)  # Default to LOW if invalid
 
