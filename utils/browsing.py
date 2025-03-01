@@ -578,22 +578,21 @@ class BrowserManager:
                     title_element = await element.query_selector('.result__title .result__a')
                     title = await title_element.inner_text() if title_element else "No title"
                     
-                    # Extract URL
-                    url_element = await element.query_selector('.result__a')
-                    url = await url_element.get_attribute('href') if url_element else ""
+                    # Extract display link first as it's the clean URL
+                    display_link_element = await element.query_selector('.result__url')
+                    display_link = await display_link_element.inner_text() if display_link_element else ""
+                    display_link = display_link.strip()
+                    
+                    # Use display link as the main URL, adding https:// if needed
+                    url = f"https://{display_link}" if display_link and not display_link.startswith(('http://', 'https://')) else display_link
                     
                     # Extract description/snippet
                     snippet_element = await element.query_selector('.result__snippet')
                     snippet = await snippet_element.inner_text() if snippet_element else ""
                     
-                    # Extract display link
-                    display_link_element = await element.query_selector('.result__url')
-                    display_link = await display_link_element.inner_text() if display_link_element else ""
-                    
                     # Clean up the text
                     title = title.strip()
                     snippet = snippet.strip()
-                    display_link = display_link.strip()
                     
                     # Format in Google CSE style
                     result = {
