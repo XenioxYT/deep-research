@@ -545,7 +545,7 @@ class BrowserManager:
         Returns:
             List of results in Google CSE format
         """
-        self.logger.info(f"Searching DuckDuckGo for: {query}")
+        self.logger.info(f"Searching DuckDuckGo HTML for: {query}")
         results = []
         page = None
         
@@ -611,7 +611,92 @@ class BrowserManager:
             return results
             
         except Exception as e:
-            self.logger.error(f"DuckDuckGo search error: {str(e)}")
+            self.logger.error(f"DuckDuckGo HTML search error: {str(e)}")
+            return []
+            
+        finally:
+            if page:
+                await page.close()
+                
+    async def search_duckduckgo_regular(self, query: str, num_results: int = 10) -> list[dict]:
+        """
+        Search regular DuckDuckGo (not HTML-only version) and extract results.
+        
+        Args:
+            query: The search query string
+            num_results: Maximum number of results to return
+            
+        Returns:
+            List of results in Google CSE format
+        """
+        self.logger.info(f"Searching regular DuckDuckGo for: {query}")
+        results = []
+        page = None
+        
+        try:
+            # Format the query for URL
+            encoded_query = query.replace(' ', '+')
+            url = f"https://duckduckgo.com/?q={encoded_query}"
+            
+            page = await self.context.new_page()
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            
+            # Wait for search results to load - using the article selector from regular DDG
+            await page.wait_for_selector('article[data-testid="result"]', timeout=10000)
+            
+            # Extract results
+            result_elements = await page.query_selector_all('article[data-testid="result"]')
+            
+            for element in result_elements:
+                if len(results) >= num_results:
+                    break
+                    
+                try:
+                    # Check if result is an ad
+                    ad_badge = await element.query_selector('.badge--ad')
+                    if ad_badge:
+                        self.logger.debug("Skipping ad result")
+                        continue
+                    
+                    # Extract title
+                    title_element = await element.query_selector('h2 a span')
+                    title = await title_element.inner_text() if title_element else "No title"
+                    
+                    # Extract URL
+                    url_element = await element.query_selector('h2 a')
+                    url = await url_element.get_attribute('href') if url_element else ""
+                    
+                    # Extract display link
+                    display_link_element = await element.query_selector('.veU5I0hFkgFGOPhX2RBE span')
+                    display_link = await display_link_element.inner_text() if display_link_element else ""
+                    
+                    # Extract description/snippet
+                    snippet_element = await element.query_selector('.kY2IgmnCmOGjharHErah')
+                    snippet = await snippet_element.inner_text() if snippet_element else ""
+                    
+                    # Clean up the text
+                    title = title.strip()
+                    snippet = snippet.strip()
+                    display_link = display_link.strip()
+                    
+                    # Format in Google CSE style
+                    result = {
+                        'link': url,
+                        'title': title,
+                        'snippet': snippet,
+                        'displayLink': display_link
+                    }
+                    
+                    results.append(result)
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error extracting regular DuckDuckGo search result: {str(e)}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Regular DuckDuckGo search error: {str(e)}")
             return []
             
         finally:

@@ -4,6 +4,7 @@ import theme from './theme';
 import SearchBox from './components/SearchBox';
 import ResearchProgress from './components/ResearchProgress';
 import ResearchReport from './components/ResearchReport';
+import FollowupChat from './components/FollowupChat';
 import { v4 as uuidv4 } from 'uuid';
 
 // Backend configuration
@@ -12,11 +13,18 @@ const HOST = window.location.hostname;
 const BACKEND_URL = `http://${HOST}:${BACKEND_PORT}`;
 const WS_URL = `ws://${HOST}:${BACKEND_PORT}`;
 
+interface ChatMessage {
+  question: string;
+  answer: string;
+  timestamp: string;
+}
+
 interface GlobalState {
   is_researching: boolean;
   current_query: string | null;
   current_report: string | null;
   logs: Array<{ timestamp: string; level: string; message: string }>;
+  chat_history: ChatMessage[];
 }
 
 function App() {
@@ -26,6 +34,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [currentQuery, setCurrentQuery] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [chatExpanded, setChatExpanded] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const clientId = useRef<string>(uuidv4());
 
@@ -35,6 +45,9 @@ function App() {
     setCurrentQuery(state.current_query);
     setReport(state.current_report);
     setLogs(state.logs);
+    if (state.chat_history) {
+      setChatHistory(state.chat_history);
+    }
   }, []);
 
   // Initialize WebSocket connection and fetch initial state
@@ -120,6 +133,10 @@ function App() {
     }
   }, []);
 
+  const handleChatToggle = useCallback(() => {
+    setChatExpanded(prev => !prev);
+  }, []);
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -145,6 +162,14 @@ function App() {
           />
           {report && (
             <ResearchReport content={report} />
+          )}
+          {report && (
+            <FollowupChat 
+              clientId={clientId.current}
+              chatHistory={chatHistory}
+              isExpanded={chatExpanded}
+              onToggle={handleChatToggle}
+            />
           )}
           <Snackbar 
             open={!!error} 

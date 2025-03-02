@@ -39,6 +39,8 @@ class GlobalState:
         self.current_query: Optional[str] = None
         self.current_report: Optional[str] = None
         self.logs: list = []
+        self.chat_history: list = []  # Store follow-up Q&A history
+        self.agent: Optional[DeepResearchAgent] = None  # Store agent instance
         self.lock = asyncio.Lock()
 
     def to_dict(self):
@@ -46,7 +48,8 @@ class GlobalState:
             "is_researching": self.is_researching,
             "current_query": self.current_query,
             "current_report": self.current_report,
-            "logs": self.logs
+            "logs": self.logs,
+            "chat_history": self.chat_history
         }
 
     async def set_state(self, **kwargs):
@@ -68,6 +71,10 @@ active_tasks: Dict[str, asyncio.Task] = {}
 # Request model
 class ResearchRequest(BaseModel):
     query: str
+    client_id: str
+
+class FollowupRequest(BaseModel):
+    question: str
     client_id: str
 
 # WebSocket connection manager
@@ -212,7 +219,8 @@ async def start_research(request: ResearchRequest):
             is_researching=True,
             current_query=request.query,
             current_report=None,
-            logs=[]
+            logs=[],
+            chat_history=[]  # Reset chat history for new research
         )
 
         # Create hybrid logger
@@ -223,6 +231,8 @@ async def start_research(request: ResearchRequest):
         async def research_task():
             try:
                 async with DeepResearchAgent() as agent:
+                    # Store agent instance for follow-up questions
+                    global_state.agent = agent
                     agent.logger = logger
                     report_path = await agent.research(request.query)
                     
@@ -262,6 +272,73 @@ async def start_research(request: ResearchRequest):
         if 'logger' in locals():
             logger.error(f"Error during research: {str(e)}")
         await global_state.set_state(is_researching=False)
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+# Follow-up question endpoint
+@app.post("/api/followup")
+async def followup_question(request: FollowupRequest):
+    # Check if we have a report and agent to work with
+    if not global_state.current_report or not global_state.agent:
+        return JSONResponse(
+            content={"status": "error", "message": "No research report available to answer follow-up questions"},
+            status_code=400
+        )
+
+    try:
+        # Create hybrid logger
+        logger = HybridLogger(request.client_id)
+        logger.info(f"Processing follow-up question: {request.question}")
+        
+        # Set the agent's logger
+        global_state.agent.logger = logger
+        
+        # Create task for answering the follow-up question
+        async def followup_task():
+            try:
+                # Answer the follow-up question
+                answer = await global_state.agent.answer_followup_question(
+                    request.question, 
+                    global_state.current_query, 
+                    global_state.current_report
+                )
+                
+                # Add to chat history
+                chat_entry = {
+                    "question": request.question,
+                    "answer": answer,
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                # Update global state with new chat entry
+                async with global_state.lock:
+                    global_state.chat_history.append(chat_entry)
+                
+                # Broadcast state update to clients
+                await manager.broadcast_state_update()
+                
+                logger.info("Follow-up question answered successfully")
+                return {"status": "success", "result": answer}
+            except Exception as e:
+                logger.error(f"Error answering follow-up question: {str(e)}")
+                return {"status": "error", "message": str(e)}
+        
+        # Execute the follow-up task
+        task = asyncio.create_task(followup_task())
+        active_tasks[request.client_id] = task
+        result = await task
+        
+        # Clean up task
+        if request.client_id in active_tasks:
+            del active_tasks[request.client_id]
+            
+        return JSONResponse(content=result)
+    
+    except Exception as e:
+        if 'logger' in locals():
+            logger.error(f"Error processing follow-up question: {str(e)}")
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500

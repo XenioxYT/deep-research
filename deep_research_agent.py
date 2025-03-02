@@ -12,6 +12,7 @@ from datetime import datetime
 import re
 import asyncio
 import httplib2
+from difflib import SequenceMatcher
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from vertexai.preview import tokenization
 from utils.browsing import BrowserManager
@@ -58,9 +59,14 @@ class DeepResearchAgent:
         )  # Model for analysis
         
         self.report_model = genai.GenerativeModel(
-            'gemini-2.0-flash-exp',
+            'gemini-2.0-flash',
             safety_settings=self.safety_settings
         )  # Model for final report generation
+        
+        self.chat_model = genai.GenerativeModel(
+            'gemini-2.0-flash',
+            safety_settings=self.safety_settings
+        )  # Model for chat
         
         # Initialize Google Custom Search
         self.search_engine = build(
@@ -79,6 +85,7 @@ class DeepResearchAgent:
         self.MAX_ITERATIONS = 5
         self.system_context = system_context
         self.total_tokens = 0  # Track total tokens used
+        self.research_data = None  # Store the latest research data for follow-up questions
         
         # Initialize tokenizer for Gemini model
         self.model_name = "gemini-1.5-flash-002"
@@ -234,8 +241,8 @@ class DeepResearchAgent:
                             self.logger.warning(f"Error processing query line '{line}': {e}")
                             continue
             
-            # Always include the main query for complex queries if we have room
-            if query_type == "COMPLEX" and main_query not in subqueries and len(subqueries) < MAX_QUERIES:
+            # Always include the main query for complex queries
+            if main_query not in subqueries:
                 subqueries.append(main_query)
             
             # Log results
@@ -273,12 +280,15 @@ class DeepResearchAgent:
                             http = httplib2.Http(timeout=30)
                             http.disable_ssl_certificate_validation = True
                             
+                            # Call list() synchronously, then execute() asynchronously
+                            search_response = self.search_engine.list(
+                                q=query,
+                                cx=self.search_engine_id,
+                                num=num_results
+                            )
+                            
                             results = await asyncio.to_thread(
-                                self.search_engine.list(
-                                    q=query,
-                                    cx=self.search_engine_id,
-                                    num=num_results
-                                ).execute,
+                                search_response.execute,
                                 http=http
                             )
                             
@@ -342,14 +352,19 @@ class DeepResearchAgent:
             if i + batch_size < len(queries):
                 await asyncio.sleep(0.5)
         
+        # Deduplicate results
+        all_results = self._deduplicate_results(all_results)
+        
         self.logger.info(f"Found {len(all_results)} unique results across all queries")
         return all_results
-
 
     def rank_new_results(self, main_query: str, new_results: List[Dict]) -> List[Dict]:
         """Rank only new search results based on relevance using AI."""
         if not new_results:
             return []
+
+        # Deduplicate results before ranking
+        new_results = self._deduplicate_results(new_results)
 
         self.logger.info(f"Ranking {len(new_results)} new URLs")
 
@@ -717,6 +732,7 @@ class DeepResearchAgent:
         self.total_tokens = 0
         self.content_tokens = 0
         self.token_usage_by_operation.clear()
+        self.research_data = None
         self.logger.info("Reset research state and token counter")
 
     def clean_filename(self, query: str, max_length: int = 100) -> str:
@@ -738,6 +754,9 @@ class DeepResearchAgent:
         max_retries = 3
         base_delay = 2  # Base delay in seconds
         
+        # Deduplicate research data before generating report
+        research_data = self._deduplicate_research_data(research_data)
+        
         for attempt in range(max_retries):
             try:
                 # Prepare enhanced context with high-ranking URLs and detailed source information
@@ -745,12 +764,9 @@ class DeepResearchAgent:
                 for url, data in self.high_ranking_urls.items():
                     # Find the full content from research_data
                     source_content = None
-                    for iteration in research_data['iterations']:
-                        for finding in iteration['findings']:
-                            if finding['source'] == url:
-                                source_content = finding['content']
-                                break
-                        if source_content:
+                    for finding in research_data['final_sources']:
+                        if finding['source'] == url:
+                            source_content = finding['content']
                             break
                     
                     high_ranking_sources[url] = {
@@ -783,9 +799,10 @@ class DeepResearchAgent:
                     sources_used += f"- Relevance Score: {data['score']:.2f}\n"
                     sources_used += f"- Domain: {data['domain']}\n\n"
                 
+                # Create optimized report context with only final sources
                 report_context = {
                     'main_query': main_query,
-                    'research_data': research_data,
+                    'final_sources': research_data['final_sources'],  # Only include final sources
                     'high_ranking_sources': dict(sorted_sources),  # Ordered by score
                     'source_references': source_references,  # For citations
                     'total_sources_analyzed': len(self.all_results),
@@ -869,8 +886,6 @@ class DeepResearchAgent:
                     },
                     safety_settings=self.safety_settings
                 )
-                
-                print(response)
                 
                 # Check for prompt feedback and blocking
                 if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
@@ -1058,10 +1073,20 @@ class DeepResearchAgent:
                 
                 # Filter out None values and add to iteration data
                 valid_findings = [f for f in findings if f is not None]
-                iteration_data['findings'].extend(valid_findings)
-                research_data['final_sources'].extend(valid_findings)
+                
+                # Deduplicate findings before adding to iteration data
+                if valid_findings:
+                    iteration_data['findings'] = self._deduplicate_findings(valid_findings)
+                    
+                    # Add to final sources, but don't duplicate content that's already there
+                    existing_sources = {finding['source'] for finding in research_data['final_sources']}
+                    new_findings = [f for f in iteration_data['findings'] if f['source'] not in existing_sources]
+                    research_data['final_sources'].extend(new_findings)
             
             research_data['iterations'].append(iteration_data)
+            
+            # Deduplicate the entire research data after each iteration
+            research_data = self._deduplicate_research_data(research_data)
             
             # Create comprehensive analysis context
             analysis_context = {
@@ -1111,6 +1136,16 @@ class DeepResearchAgent:
                 'queries_used': list(self.previous_queries),
                 'findings': research_data['final_sources']
             })
+        
+        # Final deduplication of all research data before report generation
+        research_data = self._deduplicate_research_data(research_data)
+        
+        # Store the research data for follow-up questions
+        self.research_data = research_data
+        
+        # Log the size of the research data
+        total_content_size = sum(len(finding.get('content', '')) for finding in research_data['final_sources'])
+        self.logger.info(f"Total content size for report generation: {total_content_size:,} characters")
 
         # Generate and save streaming report
         self.logger.info("Generating final report with streaming...")
@@ -1127,6 +1162,235 @@ class DeepResearchAgent:
                 return f"Report has been generated and saved to: {report_file}"
         
         return "Error: Failed to generate report. Please try again."
+
+    async def answer_followup_question(self, query: str, main_query: str, report_content: str) -> str:
+        """Answer a follow-up question using the existing research data."""
+        self.logger.info(f"Processing follow-up question: {query}")
+        
+        try:
+            # Create a comprehensive context with ALL research data, matching what the report generator receives
+            # Create optimized report context with all sources
+            report_context = {
+                'main_query': main_query,
+                'final_sources': self.research_data.get('final_sources', []),  # Include ALL final sources
+                'high_ranking_sources': self.high_ranking_urls,  # All high-ranking sources
+                'total_sources_analyzed': len(self.all_results),
+                'total_high_ranking_sources': len(self.high_ranking_urls),
+                'research_iterations': self.research_iterations,
+                'total_queries_used': len(self.previous_queries),
+                'queries_by_iteration': [
+                    iter_data.get('queries_used', []) 
+                    for iter_data in self.research_data.get('iterations', [])
+                ],
+                'all_iterations': self.research_data.get('iterations', [])  # Include ALL iteration data
+            }
+            
+            # Create prompt for the follow-up question with complete context
+            prompt = f"""You are answering a follow-up question based on a research report and its underlying sources.
+
+Original Research Question: "{main_query}"
+
+Follow-up Question: "{query}"
+
+INSTRUCTIONS:
+1. First, try to answer the question using ONLY the provided research report and source information.
+2. If the information needed isn't in the provided sources, you may use your own knowledge, but you MUST:
+   - Acknowledge that you are using your own knowledge and may hallucinate
+   - Clearly distinguish between facts from the sources and your general knowledge
+   - Be honest about limitations of your knowledge
+   - Indicate when information might be outdated
+3. Format your answer in Markdown with proper headings, lists, and emphasis where appropriate.
+4. Give URLs at the end of your answer corresponding to the sources used. Give top 2-3 sources.
+5. Keep your answers concise but comprehensive.
+6. If the question is completely unrelated to the research report or source materials, politely redirect the user to ask questions related to the original research topic, or to start a new research report.
+7. You should be using markdown to format your answer, like the original report. You should NOT use reference [1], [2], etc.
+
+Research Report Content:
+{report_content}
+
+Complete Research Context:
+{json.dumps(report_context, indent=2)}
+
+Answer the follow-up question thoroughly and accurately based on the information provided above.
+"""
+
+            response = self.chat_model.generate_content(
+                prompt,
+                generation_config={
+                    'temperature': 0.7,
+                    'max_output_tokens': 8192,
+                },
+                safety_settings=self.safety_settings
+            )
+            
+            # Check for valid response
+            if not response or not response.text:
+                raise ValueError("Invalid response from model")
+            
+            self.logger.info("Follow-up question answered successfully")
+            return response.text
+                
+        except Exception as e:
+            error_msg = f"Error answering follow-up question: {str(e)}"
+            self.logger.error(error_msg)
+            return f"**Error:** {error_msg}\n\nPlease try rephrasing your question or asking something else."
+
+    def _deduplicate_results(self, results: List[Dict]) -> List[Dict]:
+        """Deduplicate search results based on URL and content similarity, optimized for performance."""
+        if not results:
+            return []
+            
+        # First pass: deduplicate by URL
+        url_to_result = {}
+        for result in results:
+            url = result['url']
+            rewritten_url = self.browser_manager.rewrite_url(url)
+            result['url'] = rewritten_url  # Update the result with the rewritten URL
+            
+            # If we've seen this URL before, merge source queries and keep the one with higher relevance
+            if rewritten_url in url_to_result:
+                # Merge source queries
+                if 'source_queries' in result and 'source_queries' in url_to_result[rewritten_url]:
+                    url_to_result[rewritten_url]['source_queries'].extend(result.get('source_queries', []))
+                    url_to_result[rewritten_url]['source_queries'] = list(set(url_to_result[rewritten_url]['source_queries']))
+                
+                # Keep the result with higher relevance score
+                if result.get('relevance_score', 0) > url_to_result[rewritten_url].get('relevance_score', 0):
+                    # Preserve source queries
+                    source_queries = url_to_result[rewritten_url].get('source_queries', [])
+                    url_to_result[rewritten_url] = result
+                    if source_queries and 'source_queries' in url_to_result[rewritten_url]:
+                        url_to_result[rewritten_url]['source_queries'] = list(set(source_queries + url_to_result[rewritten_url].get('source_queries', [])))
+            else:
+                url_to_result[rewritten_url] = result
+        
+        # Convert back to list
+        unique_results = list(url_to_result.values())
+        
+        # Second pass: deduplicate by content similarity (only if we have more than 10 results)
+        if len(unique_results) > 10:
+            # Helper function to remove any non-alphanumeric characters and lowercase
+            def clean_string(text: str):
+                if not text:
+                    return ""
+                return re.sub(r'\W+', '', str(text)).lower()
+            
+            # Precompute cleaned titles and snippets
+            for result in unique_results:
+                result['_clean_title'] = clean_string(result.get('title', ''))
+                result['_clean_snippet'] = clean_string(result.get('snippet', ''))
+            
+            # Find duplicates by content similarity
+            final_results = []
+            duplicate_indices = set()
+            
+            for i in range(len(unique_results)):
+                if i in duplicate_indices:
+                    continue
+                    
+                result1 = unique_results[i]
+                final_results.append(result1)
+                
+                # Only compare with results that have lower relevance scores
+                # This avoids O(n²) comparisons in the worst case
+                for j in range(i + 1, len(unique_results)):
+                    if j in duplicate_indices:
+                        continue
+                        
+                    result2 = unique_results[j]
+                    
+                    # Skip comparison if relevance scores are very different
+                    if abs(result1.get('relevance_score', 0) - result2.get('relevance_score', 0)) > 0.3:
+                        continue
+                    
+                    # Compare titles and snippets
+                    title_similarity = SequenceMatcher(
+                        None,
+                        result1['_clean_title'],
+                        result2['_clean_title']
+                    ).ratio()
+                    
+                    # Only check snippet if title is similar
+                    if title_similarity > 0.8:
+                        snippet_similarity = SequenceMatcher(
+                            None,
+                            result1['_clean_snippet'],
+                            result2['_clean_snippet']
+                        ).ratio()
+                        
+                        if title_similarity > 0.9 and snippet_similarity > 0.8:
+                            # Merge source queries
+                            if 'source_queries' in result2 and 'source_queries' in result1:
+                                result1['source_queries'].extend(result2['source_queries'])
+                                result1['source_queries'] = list(set(result1['source_queries']))
+                            
+                            # Mark as duplicate
+                            duplicate_indices.add(j)
+            
+            # Clean up temporary fields
+            for result in final_results:
+                if '_clean_title' in result:
+                    del result['_clean_title']
+                if '_clean_snippet' in result:
+                    del result['_clean_snippet']
+            
+            self.logger.info(f"Deduplicated {len(results)} results to {len(final_results)} unique results (content similarity)")
+            return final_results
+        
+        self.logger.info(f"Deduplicated {len(results)} results to {len(unique_results)} unique results (URL only)")
+        return unique_results
+
+    def _deduplicate_findings(self, findings: List[Dict]) -> List[Dict]:
+        """Deduplicate findings based on source URL, keeping the longer content when duplicates are found."""
+        url_to_finding = {}  # Map URLs to their findings
+
+        for finding in findings:
+            url = finding['source']
+            rewritten_url = self.browser_manager.rewrite_url(url)
+            finding['source'] = rewritten_url  # Update with rewritten URL
+            
+            # If we've seen this URL before, keep the one with more content
+            if rewritten_url in url_to_finding:
+                existing_content_len = len(url_to_finding[rewritten_url].get('content', ''))
+                new_content_len = len(finding.get('content', ''))
+                
+                # Keep the finding with the higher relevance score or longer content
+                if (finding.get('relevance_score', 0) > url_to_finding[rewritten_url].get('relevance_score', 0) or
+                    (finding.get('relevance_score', 0) == url_to_finding[rewritten_url].get('relevance_score', 0) and 
+                     new_content_len > existing_content_len)):
+                    url_to_finding[rewritten_url] = finding
+            else:
+                url_to_finding[rewritten_url] = finding
+
+        unique_findings = list(url_to_finding.values())
+        self.logger.info(f"Deduplicated {len(findings)} findings to {len(unique_findings)} unique findings")
+        return unique_findings
+
+    def _deduplicate_research_data(self, research_data: Dict) -> Dict:
+        """Deduplicate all findings in research data, ensuring no duplicates between iterations and final sources."""
+        # First, deduplicate findings in each iteration
+        for iteration in research_data['iterations']:
+            iteration['findings'] = self._deduplicate_findings(iteration['findings'])
+        
+        # Next, deduplicate final sources
+        if 'final_sources' in research_data:
+            research_data['final_sources'] = self._deduplicate_findings(research_data['final_sources'])
+        
+        # Now, remove duplicates between iterations and final sources
+        if 'final_sources' in research_data and research_data['final_sources']:
+            # Create a set of URLs in final_sources for quick lookup
+            final_source_urls = {finding['source'] for finding in research_data['final_sources']}
+            
+            # For each iteration, remove findings that are already in final_sources
+            for iteration in research_data['iterations']:
+                iteration['findings'] = [
+                    finding for finding in iteration['findings'] 
+                    if finding['source'] not in final_source_urls
+                ]
+            
+            self.logger.info(f"Removed duplicate findings between iterations and final sources")
+        
+        return research_data
 
 def main():
     """Run the research agent with proper async handling."""

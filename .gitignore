@@ -49,3 +49,5 @@ reports/
 node_modules/
 package-lock.json
 .vite/
+/prompts/
+/web/backend/prompts/
